@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""
+Patient Record Organizer - CLI 入口
+
+用法：
+  python cli.py ingest <path1> [path2] ...       # 收集资料
+  python cli.py manifest --init --patient P001   # 初始化患者档案
+  python cli.py ocr <file>                       # OCR 提取
+  python cli.py asr <audio_file>                 # 录音转写
+  python cli.py classify <text_file>             # 分类文本
+  python cli.py render --patient P001            # 生成报告
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def cmd_ingest(args):
+    from scripts.ingest import collect
+    results = collect(args.paths)
+    print(f"收集到 {len(results)} 个文件：")
+    for p, t in results:
+        print(f"  [{t}] {p}")
+
+
+def cmd_manifest(args):
+    from scripts.manifest import init_or_load
+    m, is_new = init_or_load(
+        args.patient,
+        name=args.name or "",
+        age=args.age,
+        gender=args.gender or "",
+        primary_diagnosis=args.diagnosis or "",
+    )
+    print(json.dumps(m, ensure_ascii=False, indent=2))
+    print(f"\n{'新建' if is_new else '加载已有'}患者档案: {args.patient}")
+
+
+def cmd_ocr(args):
+    from scripts.route_ocr import extract_text
+    import os
+    sf_key = os.getenv("SILICONFLOW_API_KEY", "")
+    mineru_key = os.getenv("MINERU_API_KEY", "")
+    mineru_url = os.getenv("MINERU_API_URL", "")
+    if not sf_key:
+        print("错误：请设置 SILICONFLOW_API_KEY 环境变量", file=sys.stderr)
+        sys.exit(1)
+    text = extract_text(args.file, sf_api_key=sf_key, mineru_api_key=mineru_key, mineru_api_url=mineru_url)
+    print(text)
+
+
+def cmd_asr(args):
+    from scripts.asr_stepfun import transcribe
+    import os
+    api_key = os.getenv("STEP_API_KEY", "")
+    if not api_key:
+        print("错误：请设置 STEP_API_KEY 环境变量", file=sys.stderr)
+        sys.exit(1)
+    result = transcribe(args.file, api_key=api_key, duration_sec=args.duration or 0, has_public_url=args.public_url or False)
+    print(result)
+
+
+def cmd_classify(args):
+    from scripts.classify import classify
+    text = Path(args.file).read_text(encoding="utf-8")
+    primary, secondary_json, confidence = classify(text)
+    print(f"主分类: {primary}")
+    print(f"置信度: {confidence}")
+    print(f"交叉引用: {secondary_json}")
+
+
+def cmd_render(args):
+    from scripts.manifest import load_manifest
+    from scripts.render_report import render_md, render_html, render_pdf, render_docx
+
+    m = load_manifest(args.patient)
+    if not m:
+        print(f"错误：患者 {args.patient} 的 manifest 不存在", file=sys.stderr)
+        sys.exit(1)
+
+    # 统一 choices 映射：both → md+html；all → 全部格式
+    fmt = args.format
+    gen_md = fmt in ("md", "both", "all")
+    gen_html = fmt in ("html", "both", "all")
+    gen_pdf = fmt in ("pdf", "all")
+    gen_docx = fmt in ("docx", "all")
+
+    if gen_md:
+        p = render_md(m)
+        print(f"✅ Markdown 报告: {p}")
+    if gen_html:
+        p = render_html(m)
+        print(f"✅ HTML 报告: {p}")
+    if gen_pdf:
+        try:
+            p = render_pdf(m)
+            print(f"✅ PDF 报告: {p}")
+        except RuntimeError as exc:
+            print(f"⚠️ PDF 生成跳过: {exc}")
+    if gen_docx:
+        try:
+            p = render_docx(m)
+            print(f"✅ Word 报告: {p}")
+        except RuntimeError as exc:
+            print(f"⚠️ Word 生成跳过: {exc}")
+
+
+def cmd_process(args):
+    """一键处理：收集 → OCR → 分类 → 危急值 → 时间线 → 报告 → 可选发布"""
+    from scripts import pipeline
+
+    if args.publish and not args.confirm_public:
+        print(
+            "错误：发布病例报告到公网前必须显式确认风险。请添加 --confirm-public；默认会发布脱敏版本，如需关闭脱敏需同时添加 --no-desensitize。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    result = pipeline.run(
+        input_dir=args.dir,
+        publish=args.publish,
+        confirm_public=args.confirm_public,
+        desensitize_public=not args.no_desensitize,
+        verbose=True,
+    )
+    print(f"\n✅ 处理完成，输出目录: {result.output_dir}")
+    # 打印报告链接
+    for rp in result.report_paths:
+        print(f"   报告: {rp}")
+    if result.publish_url:
+        print(f"\n🔗 公网链接: {result.publish_url}")
+        print(f"   状态: {result.publish_status}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Patient Record Organizer CLI")
+    sub = parser.add_subparsers(dest="command")
+
+    # ingest
+    p_ingest = sub.add_parser("ingest", help="收集资料")
+    p_ingest.add_argument("paths", nargs="+", help="文件或目录路径")
+
+    # manifest
+    p_manifest = sub.add_parser("manifest", help="患者档案管理")
+    p_manifest.add_argument("--init", action="store_true", help="新建档案")
+    p_manifest.add_argument("--patient", required=True, help="患者 ID")
+    p_manifest.add_argument("--name", default="", help="姓名")
+    p_manifest.add_argument("--age", type=int, help="年龄")
+    p_manifest.add_argument("--gender", default="", help="性别")
+    p_manifest.add_argument("--diagnosis", default="", help="主要诊断")
+
+    # ocr
+    p_ocr = sub.add_parser("ocr", help="OCR 提取")
+    p_ocr.add_argument("file", help="图片或 PDF 文件")
+
+    # asr
+    p_asr = sub.add_parser("asr", help="录音转写")
+    p_asr.add_argument("file", help="音频文件")
+    p_asr.add_argument("--duration", type=float, default=0, help="时长（秒）")
+    p_asr.add_argument("--public-url", default="", help="公网 URL")
+
+    # classify
+    p_cls = sub.add_parser("classify", help="文本分类")
+    p_cls.add_argument("file", help="文本文件")
+
+    # render
+    p_render = sub.add_parser("render", help="生成报告")
+    p_render.add_argument("--patient", required=True, help="患者 ID")
+    p_render.add_argument("--format", choices=["md", "html", "pdf", "docx", "both", "all"], default="both", help="输出格式（both=md+html，all=md+html+pdf+docx）")
+
+    # process（一键全流程）
+    p_proc = sub.add_parser("process", help="一键全流程处理（收集→OCR→分类→报告→发布）")
+    p_proc.add_argument("dir", help="病历资料目录")
+    p_proc.add_argument("--publish", action="store_true", help="发布到 EdgeOne Pages（公网链接）")
+    p_proc.add_argument("--confirm-public", action="store_true", help="确认了解公网发布风险后才允许发布")
+    p_proc.add_argument("--no-desensitize", action="store_true", help="发布时不生成脱敏版本（不推荐）")
+
+    # history（查看历史版本）
+    p_hist = sub.add_parser("history", help="查看患者处理历史")
+    p_hist.add_argument("--patient", required=True, help="患者 ID")
+    p_hist.add_argument("--version", default=None, help="查看指定版本详情")
+
+    # diff（对比两个版本）
+    p_diff = sub.add_parser("diff", help="对比两个版本差异")
+    p_diff.add_argument("--patient", required=True, help="患者 ID")
+    p_diff.add_argument("v1", help="旧版本号（如 v001）")
+    p_diff.add_argument("v2", help="新版本号（如 v002）")
+
+    # rollback（回滚到指定版本）
+    p_roll = sub.add_parser("rollback", help="回滚到指定版本")
+    p_roll.add_argument("--patient", required=True, help="患者 ID")
+    p_roll.add_argument("version", help="目标版本号（如 v001）")
+
+    args = parser.parse_args()
+    if args.command == "ingest":
+        cmd_ingest(args)
+    elif args.command == "manifest":
+        cmd_manifest(args)
+    elif args.command == "ocr":
+        cmd_ocr(args)
+    elif args.command == "asr":
+        cmd_asr(args)
+    elif args.command == "classify":
+        cmd_classify(args)
+    elif args.command == "render":
+        cmd_render(args)
+    elif args.command == "process":
+        cmd_process(args)
+    elif args.command == "history":
+        from scripts.memory import list_versions, recall_version
+        versions = list_versions(args.patient)
+        if not versions:
+            print(f"患者 {args.patient} 无历史记录")
+            sys.exit(0)
+        if args.version:
+            detail = recall_version(args.patient, args.version)
+            if not detail:
+                print(f"版本 {args.version} 不存在")
+                sys.exit(1)
+            print(json.dumps(detail, ensure_ascii=False, indent=2))
+        else:
+            print(f"患者 {args.patient} 的历史版本：")
+            for v in versions:
+                url = v.get("publish_url") or ""
+                print(f"  {v['version_id']} | {v['created_at']} | 文件{v['files_total']}个 | 危急值{v['critical_alerts']}项 | {url}")
+    elif args.command == "diff":
+        from scripts.memory import diff_versions
+        diff = diff_versions(args.patient, args.v1, args.v2)
+        print(json.dumps(diff, ensure_ascii=False, indent=2))
+    elif args.command == "rollback":
+        from scripts.memory import rollback
+        result = rollback(args.patient, args.version)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

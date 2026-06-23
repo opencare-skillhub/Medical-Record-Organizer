@@ -1,0 +1,68 @@
+{
+  "report_type": "imaging",
+  "report_date": "2024-12-31",
+  "confidence": 1.0,
+  "patient_info": [
+    {
+      "name": "QIN XIAO QIANG"
+    },
+    {
+      "institution": "Fudan Univ. Cancer Hospital"
+    }
+  ],
+  "imaging_parameters": [
+    {
+      "parameter": "影像尺寸",
+      "value": "512x512"
+    },
+    {
+      "parameter": "序列",
+      "value": "4"
+    },
+    {
+      "parameter": "扫描序列",
+      "value": "Body 3.0"
+    },
+    {
+      "parameter": "WW/WL（窗宽/窗位）",
+      "value": "250/50"
+    },
+    {
+      "parameter": "影像模态",
+      "value": "DICOM CT"
+    },
+    {
+      "parameter": "X坐标",
+      "value": "280"
+    },
+    {
+      "parameter": "Y坐标",
+      "value": "378"
+    },
+    {
+      "parameter": "CT值",
+      "value": "-961.00"
+    },
+    {
+      "parameter": "放大倍数（Im）",
+      "value": "28"
+    },
+    {
+      "parameter": "缩放比例（Zoom）",
+      "value": "70%"
+    },
+    {
+      "parameter": "层厚（thickness）",
+      "value": "3mm"
+    },
+    {
+      "parameter": "层间距（L）",
+      "value": "0mm"
+    }
+  ],
+  "lab_results": [],
+  "pathology_results": [],
+  "medication_orders": [],
+  "clinical_records": [],
+  "_source_file": "IMG_0109.md"
+}
