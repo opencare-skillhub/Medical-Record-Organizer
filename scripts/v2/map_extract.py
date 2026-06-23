@@ -21,33 +21,53 @@ EXTRACT_SCHEMA: Dict[str, Any] = {
     'properties': {
         'report_type': {
             'type': 'string',
-            'enum': ['lab', 'imaging', 'pathology', 'medication', 'clinical', 'other'],
+            'enum': ['lab_results', 'imaging', 'pathology', 'medication', 'clinical_records', 'basic_info', 'invoice', 'noise'],
         },
-        'report_date': {'type': 'string'},
+        'document_date': {'type': 'string', 'description': 'YYYY-MM-DD'},
         'confidence': {'type': 'number'},
-        'diagnoses': {
-            'type': 'array',
-            'items': {
-                'type': 'object',
-                'properties': {
-                    'name': {'type': 'string'},
-                    'icd10': {'type': 'string'},
-                    'subtype': {'type': 'string'},
-                    'confirmed_date': {'type': 'string'},
-                },
+        'demographics': {
+            'type': 'object',
+            'properties': {
+                'name': {'type': 'string'},
+                'gender': {'type': 'string'},
+                'age': {'type': 'number'},
+                'medical_record_no': {'type': 'string'},
             },
         },
         'lab_values': {
             'type': 'array',
+            'description': '展平格式的检验指标（Shuffle 直接消费）',
             'items': {
                 'type': 'object',
                 'properties': {
                     'name': {'type': 'string'},
                     'value': {'type': 'number'},
                     'unit': {'type': 'string'},
+                    'date': {'type': 'string'},
                     'ref_low': {'type': 'number'},
                     'ref_high': {'type': 'number'},
                     'abnormal': {'type': 'boolean'},
+                },
+            },
+        },
+        'lab_tests': {
+            'type': 'object',
+            'description': '嵌套结构（供下游按需使用）',
+            'properties': {
+                'tumor_markers': {'type': 'array'},
+                'blood_routine': {'type': 'array'},
+                'liver_kidney': {'type': 'array'},
+            },
+        },
+        'imaging': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'modality': {'type': 'string'},
+                    'date': {'type': 'string'},
+                    'findings': {'type': 'string'},
+                    'conclusion': {'type': 'string'},
                 },
             },
         },
@@ -56,16 +76,47 @@ EXTRACT_SCHEMA: Dict[str, Any] = {
             'items': {
                 'type': 'object',
                 'properties': {
-                    'drug': {'type': 'string'},
+                    'name': {'type': 'string'},
+                    'type': {'type': 'string'},
+                    'start_date': {'type': 'string'},
+                    'dosage': {'type': 'string'},
                     'dose': {'type': 'string'},
                     'route': {'type': 'string'},
                     'frequency': {'type': 'string'},
-                    'cycle': {'type': 'string'},
+                    'purpose': {'type': 'string'},
+                },
+            },
+        },
+        'diagnoses': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'name': {'type': 'string'},
+                    'stage': {'type': 'string'},
+                    'icd10': {'type': 'string'},
+                    'subtype': {'type': 'string'},
+                    'confirmed_date': {'type': 'string'},
                 },
             },
         },
         'findings': {'type': 'array', 'items': {'type': 'string'}},
+        'conclusion': {'type': 'string'},
         'procedures': {'type': 'array', 'items': {'type': 'string'}},
+        'test_items': {
+            'type': 'array',
+            'description': '基因检测项目（pathology 类型）',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'gene_name': {'type': 'string'},
+                    'detection_result': {'type': 'string'},
+                    'category': {'type': 'string'},
+                    'is_pathogenic': {'type': 'boolean'},
+                    'clinical_significance': {'type': 'string'},
+                },
+            },
+        },
         'noise': {'type': 'array', 'items': {'type': 'string'}},
     },
     'required': ['report_type', 'confidence'],
@@ -73,13 +124,22 @@ EXTRACT_SCHEMA: Dict[str, Any] = {
 
 SYSTEM_PROMPT = """你是一名资深病案整理员。下面是一份医疗文件（已脱敏）。
 请提取其中的结构化信息。注意：
-1. report_type 必须准确：检验报告选 lab，CT/MRI/超声选 imaging，病理/基因选 pathology，
-   处方/医嘱选 medication，出院/门诊/手术记录选 clinical，非医疗文件选 other。
-2. 必须提取报告日期：report_date 字段格式为 YYYY-MM-DD。如果文件中有明确日期（如
-   "2024-12-31"、"2024年3月15日"），请准确提取；如果日期不确定，返回空字符串。
-3. 数值必须带单位和参考范围（如报告自带）。
-4. 如某字段在文件中不存在，返回空数组，不要编造。
-5. confidence 反映你对该分类的把握（0-1）。"""
+1. report_type 必须准确，只能从以下枚举值中选择：
+   - lab_results：检验报告（血常规/生化/肿瘤标志物/凝血等）
+   - imaging：影像检查（CT/MRI/超声/内镜/PET-CT等）
+   - pathology：病理报告（组织学/基因检测/免疫组化等）
+   - medication：用药/处方/医嘱
+   - clinical_records：出院小结/门诊/手术记录
+   - basic_info：患者基本信息
+   - invoice：发票/收据
+   - noise：非医疗内容
+2. document_date：报告日期，格式 YYYY-MM-DD。必须提取！如果文件中有明确日期（如
+   "2024-12-31"、"2024年3月15日"），请准确提取；不确定则返回空字符串。
+3. lab_values：所有检验指标用展平数组输出，每项必须包含 name/value/unit，
+   有参考范围时填 ref_low/ref_high/abnormal。
+4. medications 数组中每项用 name 字段（不是 drug）。
+5. 如某字段在文件中不存在，返回空数组，不要编造。
+6. confidence 反映你对该分类的把握（0-1）。"""
 
 
 def extract_single(
@@ -87,17 +147,30 @@ def extract_single(
     filename: str,
     *,
     model: Optional[str] = None,
-    max_chars: int = 4000,
+    max_chars: int = 12000,
 ) -> Dict[str, Any]:
     """单文件 LLM 提取。"""
+    truncation_note = ''
+    if len(sanitized_text) > max_chars:
+        truncation_note = f'\n[文本已截断，原始长度 {len(sanitized_text)} 字符]'
+        # 保留开头和结尾
+        head = sanitized_text[:max_chars - 500]
+        tail = sanitized_text[-400:]
+        truncated_text = head + '\n...\n' + tail
+    else:
+        truncated_text = sanitized_text
+
     messages = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
-        {'role': 'user', 'content': f'文件名：{filename}\n\n内容：\n{sanitized_text[:max_chars]}'},
+        {'role': 'user', 'content': f'文件名：{filename}\n\n内容：\n{truncated_text}{truncation_note}'},
     ]
     result = call_llm_with_retry(messages, EXTRACT_SCHEMA, model=model)
-    result.setdefault('report_type', 'other')
+    result.setdefault('report_type', 'noise')
     result.setdefault('confidence', 0.0)
     result['_source_file'] = filename
+    # 向后兼容：document_date 也映射到 report_date
+    if result.get('document_date') and not result.get('report_date'):
+        result['report_date'] = result['document_date']
     return result
 
 

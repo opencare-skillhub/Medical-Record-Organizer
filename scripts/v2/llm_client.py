@@ -152,7 +152,11 @@ def call_llm_with_retry(
     max_tokens: int = 2000,
     timeout: int = 60,
 ) -> Dict[str, Any]:
-    """带重试的 LLM 调用，失败时按 LLM_FALLBACK_MODELS 降级。"""
+    """带重试的 LLM 调用。
+
+    降级策略：遍历 MODEL_PRIORITY 列表 [primary] + fallback_models，
+    每个模型最多尝试 max_retries 次，全部失败才抛异常。
+    """
     primary = model or resolve_default_model()
     chain: List[str] = [primary]
     for fb in resolve_fallback_models():
@@ -160,18 +164,51 @@ def call_llm_with_retry(
             chain.append(fb)
 
     last_error: Optional[Exception] = None
-    for spec in chain[:max_retries]:
-        try:
-            return call_llm_with_schema(
-                messages,
-                schema,
-                model=spec,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=timeout,
-            )
-        except Exception as exc:  # pragma: no cover - 网络失败兜底
-            last_error = exc
-            logger.warning('LLM 调用失败 spec=%s: %s', spec, exc)
-            continue
-    raise RuntimeError(f'LLM 调用失败（{max_retries}次重试）：{last_error}')
+    for spec in chain:
+        for attempt in range(max_retries):
+            try:
+                return call_llm_with_schema(
+                    messages,
+                    schema,
+                    model=spec,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                )
+            except Exception as exc:  # pragma: no cover - 网络失败兜底
+                last_error = exc
+                logger.warning('LLM 调用失败 spec=%s attempt=%d/%d: %s', spec, attempt + 1, max_retries, exc)
+                continue
+    raise RuntimeError(f'LLM 调用失败（已尝试 {len(chain)} 个模型，每个 {max_retries} 次）：{last_error}')
+
+
+def extract_structured(
+    text: str,
+    schema: Dict[str, Any],
+    *,
+    model: Optional[str] = None,
+    system_prompt: str = '',
+    max_chars: int = 12000,
+) -> Dict[str, Any]:
+    """结构化提取的便捷封装，内置智能截断（C8）。
+
+    截断策略：保留开头（含报告类型/关键指标）和结尾（含结论），并标注截断。
+    """
+    truncation_note = ''
+    if len(text) > max_chars:
+        truncation_note = f'\n[文本已截断，原始长度 {len(text)} 字符]'
+        head = text[:max_chars - 500]
+        tail = text[-400:]
+        truncated = head + '\n...\n' + tail
+    else:
+        truncated = text
+
+    messages = []
+    if system_prompt:
+        messages.append({'role': 'system', 'content': system_prompt})
+    messages.append({
+        'role': 'user',
+        'content': f'{truncated}{truncation_note}',
+    })
+
+    return call_llm_with_retry(messages, schema, model=model)

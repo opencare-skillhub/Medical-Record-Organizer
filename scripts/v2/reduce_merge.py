@@ -3,8 +3,9 @@ v2 Reduce 层
 
 职责：
 - 对检验组做趋势分析
-- 对用药组重建化疗时间线
+- 对用药组重建化疗时间线（含去重）
 - 对影像组生成病灶演变叙事
+- alert_level 字符串规范化（C5）
 """
 from __future__ import annotations
 
@@ -15,6 +16,25 @@ from typing import Any, Dict, List, Optional
 from scripts.v2.llm_client import call_llm_with_retry
 
 logger = logging.getLogger(__name__)
+
+
+# alert_level 别名映射（C5）
+_ALERT_LEVEL_ALIASES = {
+    'high': 'critical',
+    'elevated': 'warning',
+    'abnormal': 'warning',
+    'normal': 'normal',
+    'warning': 'warning',
+    'critical': 'critical',
+}
+
+
+def normalize_alert_level(raw: str) -> str:
+    """规范化 alert_level 字符串。"""
+    if not raw:
+        return 'normal'
+    key = raw.lower().strip()
+    return _ALERT_LEVEL_ALIASES.get(key, 'normal')
 
 
 LAB_REDUCE_PROMPT = """你是临床检验分析师。以下是患者某检验指标在多次随访中的数值（已脱敏）：
@@ -88,15 +108,19 @@ def reduce_lab_trends(
         prompt = LAB_REDUCE_PROMPT.format(
             indicator=indicator,
             unit=data.get('unit', ''),
-            ref_low=ref[0] if ref[0] is not None else '未知',
-            ref_high=ref[1] if ref[1] is not None else '未知',
+            ref_low=ref[0] if isinstance(ref, tuple) and ref[0] is not None else (ref if ref else '未知'),
+            ref_high=ref[1] if isinstance(ref, tuple) and ref[1] is not None else '未知',
             trend_json=json.dumps(data.get('trend', []), ensure_ascii=False, indent=2),
         )
         try:
-            results[indicator] = _reduce_with_schema(prompt, schema, model=model)
+            result = _reduce_with_schema(prompt, schema, model=model)
+            # 规范化 alert_level（C5）
+            if 'alert_level' in result:
+                result['alert_level'] = normalize_alert_level(result['alert_level'])
+            results[indicator] = result
         except Exception as exc:
             logger.warning('Reduce lab 失败 %s: %s', indicator, exc)
-            results[indicator] = {'error': str(exc), 'indicator': indicator}
+            results[indicator] = {'error': str(exc), 'indicator': indicator, 'alert_level': 'normal'}
     return results
 
 
@@ -105,7 +129,7 @@ def reduce_medication_history(
     *,
     model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """重建化疗时间线。"""
+    """重建化疗时间线（含去重合并）。"""
     schema = {
         'type': 'object',
         'properties': {
@@ -115,14 +139,41 @@ def reduce_medication_history(
             'toxicities': {'type': 'array'},
         },
     }
+
+    # 预处理：合并所有 medications，去重（同名+同期视为同一条）
+    all_meds: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for record in med_group:
+        meds = record.get('medications') or []
+        record_date = record.get('document_date') or record.get('report_date') or ''
+        for med in meds:
+            if not isinstance(med, dict):
+                continue
+            name = med.get('name') or med.get('drug') or ''
+            start = med.get('start_date') or record_date or ''
+            key = f"{name}|{start}"
+            if key in seen_keys or not name:
+                continue
+            seen_keys.add(key)
+            normalized_med = dict(med)
+            normalized_med.setdefault('name', name)
+            normalized_med.setdefault('start_date', start)
+            all_meds.append(normalized_med)
+
+    # 按 start_date 排序
+    all_meds.sort(key=lambda m: m.get('start_date', '') or '')
+
     prompt = MED_REDUCE_PROMPT.format(
-        medications_json=json.dumps(med_group, ensure_ascii=False, indent=2)
+        medications_json=json.dumps(all_meds, ensure_ascii=False, indent=2)
     )
     try:
-        return _reduce_with_schema(prompt, schema, model=model)
+        result = _reduce_with_schema(prompt, schema, model=model)
+        # 保留去重后的时间线供下游使用
+        result['timeline'] = all_meds
+        return result
     except Exception as exc:
         logger.warning('Reduce medication 失败: %s', exc)
-        return {'error': str(exc)}
+        return {'error': str(exc), 'timeline': all_meds}
 
 
 def reduce_imaging_narrative(
