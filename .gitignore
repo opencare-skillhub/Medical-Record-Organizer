@@ -11,6 +11,19 @@ patients/
 *.pdf
 *.docx
 
+# temporary files (do not commit)
+temp_*/
+temp*/
+*.tmp
+*.log
+
+# design / planning docs (keep out of versioned source)
+design/
+designs/
+docs/plans/
+docs/*.md
+!docs/patient-profile-schema-v1.md
+
 # python
 __pycache__/
 *.py[cod]
