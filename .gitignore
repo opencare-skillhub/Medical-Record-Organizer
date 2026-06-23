@@ -24,6 +24,14 @@ docs/plans/
 docs/*.md
 !docs/patient-profile-schema-v1.md
 
+# root-level design/planning docs
+PRD.md
+llm_process_keys.md
+mineru_api_batch.md
+mineru_api_guide.md
+step_asr_guide.md
+xyb
+
 # python
 __pycache__/
 *.py[cod]
