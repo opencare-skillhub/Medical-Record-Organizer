@@ -118,7 +118,7 @@ def record_run(
         out = Path(output_dir)
         snap_output = snap_dir / "output"
         snap_output.mkdir(parents=True, exist_ok=True)
-        for fname in ("case_report.md", "case_report.html", "case_report.pdf", "case_report.docx"):
+        for fname in ("case_report.md", "report.html", "case_report.html", "case_report.pdf", "case_report.docx"):
             src = out / fname
             if src.exists():
                 shutil.copy2(src, snap_output / fname)

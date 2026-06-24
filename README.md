@@ -104,8 +104,8 @@ Agent 会递归扫描目录下所有支持格式。
   ─ 2024-04-01  一线治疗开始
 
 ✅ 病例档案已生成：
-   - output/case-report.md
-   - output/case-report.html
+   - output/case_report.md
+   - output/report.html
 ```
 
 ## 项目结构
@@ -124,7 +124,7 @@ patient-record-organizer/
 ├── references/
 │   ├── case-report-template.md  # 病例档案 Jinja2 模板
 │   └── classification-rules.md  # 分类关键词词库
-├── tests/                 # 单元测试（114 passed）
+├── tests/                 # 单元测试（156 passed）
 ├── PRD.md                 # 产品需求文档
 ├── SKILL.md               # Agent 工作流编排
 ├── requirements.txt       # Python 依赖

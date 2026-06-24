@@ -24,6 +24,11 @@ def test_run_pipeline_generates_profile(tmp_dir, monkeypatch):
     assert profile['file_count'] == 2
     assert profile['map_count'] == 2
     assert (output_dir / 'profile.json').exists()
+    assert (output_dir / 'mdt_analysis.json').exists()
+    mdt = json.loads((output_dir / 'mdt_analysis.json').read_text(encoding='utf-8'))
+    assert {'specialty_reports', 'concerns', 'fallback_used', 'error'} <= set(mdt)
+    assert (output_dir / 'report.html').exists()
+    assert (output_dir / 'report.html').stat().st_size > 0
     assert (output_dir / 'case_report.md').exists()
     assert (output_dir / 'mappings.json').exists()
 
@@ -45,4 +50,5 @@ def test_run_pipeline_creates_sanitized_and_map_dirs(tmp_dir, monkeypatch):
 
     assert (output_dir / 'sanitized').exists()
     assert (output_dir / 'map').exists()
+    assert (output_dir / 'report.html').exists()
     assert (output_dir / 'sanitized' / 'a.md').exists()

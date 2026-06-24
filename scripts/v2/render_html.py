@@ -281,12 +281,22 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                     break
         lab_trend_rows.append(row)
 
-    # chart_svg_ca199（纯字符串模板生成 SVG）
+    # chart_svg_ca199（保留兼容）
     chart_svg_ca199 = ''
     chart_svg = ''
     if 'CA199' in tumor_marker_tables:
         chart_svg_ca199 = _generate_marker_svg(tumor_marker_tables['CA199'])
         chart_svg = chart_svg_ca199
+
+    # 多指标趋势图（归一化 + 绝对值 + 同步性告警）
+    from scripts.render_html import (
+        _generate_multi_marker_svg,
+        _generate_absolute_multi_svg,
+        _analyze_marker_synchronization,
+    )
+    chart_svg_normalized = _generate_multi_marker_svg(tumor_marker_tables)
+    chart_svg_absolute = _generate_absolute_multi_svg(tumor_marker_tables)
+    marker_sync_alert = _analyze_marker_synchronization(tumor_marker_tables)
 
     # ---- critical_alerts ----
     critical_alerts: List[Dict[str, Any]] = []
@@ -317,11 +327,29 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
     has_critical = any(a['level'] >= 4 for a in critical_alerts)
 
     # ---- key_concerns ----
-    key_concerns: List[str] = []
-    for a in critical_alerts:
-        key_concerns.append(a['message'])
-    if img_narr.get('data_limitation'):
-        key_concerns.append(img_narr['data_limitation'])
+    priority_labels = {'high': '高', 'medium': '中', 'low': '低'}
+    key_concerns: List[Any] = []
+    mdt_analysis = profile.get('mdt_analysis') or {}
+    mdt_concerns = mdt_analysis.get('concerns') or []
+    if mdt_concerns:
+        for item in mdt_concerns:
+            if isinstance(item, dict):
+                priority = item.get('priority') or 'medium'
+                key_concerns.append({
+                    'text': item.get('title') or item.get('analysis') or '',
+                    'analysis': item.get('analysis') or '',
+                    'priority': priority,
+                    'priority_label': priority_labels.get(priority, '中'),
+                    'disciplines': item.get('disciplines') or ([item.get('discipline')] if item.get('discipline') else []),
+                    'suggested_direction': item.get('suggested_direction') or '',
+                })
+            else:
+                key_concerns.append({'text': str(item), 'priority': 'medium'})
+    else:
+        for a in critical_alerts:
+            key_concerns.append(a['message'])
+        if img_narr.get('data_limitation'):
+            key_concerns.append(img_narr['data_limitation'])
 
     # ---- consultation_questions ----
     consultation_questions: List[str] = [
@@ -377,6 +405,9 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         'lab_trend': lab_trend_rows,
         'chart_svg_ca199': chart_svg_ca199,
         'chart_svg': chart_svg,
+        'chart_svg_normalized': chart_svg_normalized,
+        'chart_svg_absolute': chart_svg_absolute,
+        'marker_sync_alert': marker_sync_alert,
         'key_concerns': key_concerns,
         'consultation_questions': consultation_questions,
         'files': files,

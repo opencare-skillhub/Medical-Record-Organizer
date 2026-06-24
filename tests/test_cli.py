@@ -58,3 +58,59 @@ def test_xyb_process_help_includes_publish_safety_flags():
     assert result.returncode == 0
     assert "--confirm-public" in result.stdout
     assert "--no-desensitize" in result.stdout
+
+
+def test_pipeline_cli_open_prefers_report_html(tmp_dir, monkeypatch):
+    import scripts.pipeline as pipeline
+
+    opened = []
+    (tmp_dir / "input.md").write_text("检验报告", encoding="utf-8")
+    output_dir = tmp_dir / "output"
+    output_dir.mkdir()
+    (output_dir / "report.html").write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_pipeline",
+        lambda **_kw: {"patient_id": "P_TEST", "file_count": 1, "groups": {}},
+    )
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    rc = pipeline.main([
+        "--input-dir", str(tmp_dir),
+        "--output-dir", str(output_dir),
+        "--patient-id", "P_TEST",
+        "--format", "html",
+        "--open",
+    ])
+
+    assert rc == 0
+    assert opened == [f"file://{output_dir / 'report.html'}"]
+
+
+def test_pipeline_cli_open_falls_back_to_case_report_html(tmp_dir, monkeypatch):
+    import scripts.pipeline as pipeline
+
+    opened = []
+    (tmp_dir / "input.md").write_text("检验报告", encoding="utf-8")
+    output_dir = tmp_dir / "output"
+    output_dir.mkdir()
+    (output_dir / "case_report.html").write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_pipeline",
+        lambda **_kw: {"patient_id": "P_TEST", "file_count": 1, "groups": {}},
+    )
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    rc = pipeline.main([
+        "--input-dir", str(tmp_dir),
+        "--output-dir", str(output_dir),
+        "--patient-id", "P_TEST",
+        "--format", "html",
+        "--open",
+    ])
+
+    assert rc == 0
+    assert opened == [f"file://{output_dir / 'case_report.html'}"]

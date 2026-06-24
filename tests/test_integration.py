@@ -59,7 +59,8 @@ sys.modules.setdefault("docx", _fake_docx)
 import scripts.ingest as ingest_mod
 import scripts.manifest as manifest_mod
 import scripts.classify as classify_mod
-import scripts.render_report as render_mod
+import scripts.render_md as render_md_mod
+import scripts.render_html as render_html_mod
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -140,10 +141,12 @@ def test_e2e_first_archive(patient_workspace, tmp_dir):
     pdf_out = tmp_dir / "e2e_report.pdf"
     docx_out = tmp_dir / "e2e_report.docx"
 
-    render_mod.render_md(m, timeline=timeline, output_path=md_out)
-    render_mod.render_html(m, timeline=timeline, output_path=html_out)
-    render_mod.render_pdf(m, timeline=timeline, output_path=pdf_out)
-    render_mod.render_docx(m, timeline=timeline, output_path=docx_out)
+    render_md_mod.render_md(m, timeline=timeline, output_path=md_out)
+    render_html_mod.render_html_report(m, timeline=timeline, output_path=html_out)
+    # PDF/DOCX 仍需通过 render_report（保留向后兼容）
+    import scripts.render_report as render_doc_mod
+    render_doc_mod.render_pdf(m, timeline=timeline, output_path=pdf_out)
+    render_doc_mod.render_docx(m, timeline=timeline, output_path=docx_out)
 
     assert md_out.exists()
     assert html_out.exists()
@@ -250,7 +253,7 @@ def test_e2e_critical_values_alert(patient_workspace, tmp_dir):
 
     # 生成报告（extra 中传入提取文本，让危急值引擎工作）
     md_out = tmp_dir / "crit_report.md"
-    render_mod.render_md(m, timeline=[], output_path=md_out, extra={"extracted_texts": [text]})
+    render_md_mod.render_md(m, timeline=[], output_path=md_out, extra={"extracted_texts": [text]})
     md_text = md_out.read_text(encoding="utf-8")
     # 应包含危急值提示
     assert "危急" in md_text or "警报" in md_text or "血红蛋白" in md_text

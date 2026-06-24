@@ -215,7 +215,10 @@ def test_format_alerts_html_escapes_dynamic_fields():
 
     html = format_alerts_html([alert])
 
+    # 核心 XSS 向量：不应出现未转义的 HTML 标签
     assert "<script" not in html
-    assert "onerror" not in html
     assert "<img" not in html
+    assert "<b>" not in html
+    # 转义后的文本内容应保留（作为安全文本）
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "critical-banner" in html

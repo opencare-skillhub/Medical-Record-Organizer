@@ -1,5 +1,5 @@
 """
-脱敏工具测试
+脱敏工具测试（v2 实现）
 """
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ def test_desensitize_text_id_card():
     text = "患者，身份证号110101199001011234，前来就诊。"
     result = desensitize_text(text)
     assert "110101199001011234" not in result
-    assert "***身份证***" in result
+    assert "[ID_" in result  # v2 使用 [ID_N] 格式
 
 
 def test_desensitize_text_phone():
     text = "联系电话：13812345678"
     result = desensitize_text(text)
     assert "13812345678" not in result
-    assert "***手机***" in result
+    assert "[PHONE_" in result  # v2 使用 [PHONE_N] 格式
 
 
 def test_desensitize_text_medical_record_number():
@@ -44,7 +44,7 @@ def test_desensitize_manifest_name():
         "files": [],
     }
     result = desensitize_manifest(m)
-    assert result["demographics"]["name"] == "张**"
+    assert result["demographics"]["name"] == "张*"
 
 
 def test_desensitize_manifest_single_char_name():
@@ -72,11 +72,11 @@ def test_desensitize_for_output_full():
         ],
     }
     result = desensitize_for_output(m)
-    assert result["demographics"]["name"] == "张**"
+    assert result["demographics"]["name"] == "张*"
     assert "张三" not in result["files"][0]["original_name"]
 
 
-# Fix 9：医疗术语不应被误脱敏
+# 医疗术语不应被误脱敏
 def test_desensitize_preserves_medical_terms():
     text = "患者：李华，诊断：肺腺癌。建议行胸部CT平扫。"
     result = desensitize_text(text)

@@ -1,5 +1,5 @@
 """
-v2 Shuffle 层
+Shuffle 层
 
 职责：
 - 按 report_type 分组（data-contract.md 枚举 → 分组键）
@@ -276,17 +276,10 @@ def _compute_flag(value: Any, ref_low: Optional[float], ref_high: Optional[float
         v = float(value)
     except (ValueError, TypeError):
         return '→' if abnormal else ''
-    # 防御：ref_low / ref_high 可能为空字符串或非数字类型
-    try:
-        if ref_low is not None and v < float(ref_low):
-            return '↓'
-    except (ValueError, TypeError):
-        pass
-    try:
-        if ref_high is not None and v > float(ref_high):
-            return '↑'
-    except (ValueError, TypeError):
-        pass
+    if ref_low is not None and v < ref_low:
+        return '↓'
+    if ref_high is not None and v > ref_high:
+        return '↑'
     return ''
 
 

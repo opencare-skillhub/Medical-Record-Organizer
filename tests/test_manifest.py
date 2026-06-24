@@ -139,8 +139,8 @@ def test_append_files_refreshes_summary(patient_dir):
     f1 = patient_dir / "ct.txt"
     f1.write_bytes(b"CT report")
     m = append_files(m, [(str(f1), "text")])
-    # 此时 category 为 None，summary 应为空
-    assert m["categories_summary"] == {}
+    # category 为 None 的条目归入 "other"
+    assert m["categories_summary"] == {"other": 1}
 
     # 模拟分类后更新 category
     m["files"][0]["category"] = "imaging"
