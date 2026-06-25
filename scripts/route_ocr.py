@@ -54,6 +54,7 @@ _SF_OCR_INSTRUCTION = '请识别图片中所有文字，按原文顺序输出，
 
 # 失败标记前缀：以 `[` 开头视为失败，触发回退且不写入成功缓存
 _FAIL_PREFIX = '['
+_FAIL_BLOCKED = '[MinerU失败-需人工确认]'
 
 
 def _resolve_mineru_key(explicit: str = '') -> str:
@@ -347,12 +348,13 @@ def extract_via_mineru(
     api_url: str = '',
     model_version: str = '',
     extract_dir: Optional[Path] = None,
+    max_retries: int = 3,
 ) -> str:
     """通过 MinerU API 提取文本（图片或 PDF），严格对齐 docs/mineru_batch_api.md。
 
     流程：申请上传链接(files 数组) → PUT 上传(无 Content-Type) → 路径参数轮询 → 下载 ZIP。
     配置解析（显式参数 > env）：api_key、api_url(base)、model_version。
-    失败不缓存，便于下次重试。
+    失败自动重试 max_retries 次（指数退避: 2/4/8s），成功则缓存，重试耗尽返回 FAIL。
     """
     key = _resolve_mineru_key(api_key)
     base = _resolve_mineru_base(api_url)
@@ -369,7 +371,7 @@ def extract_via_mineru(
 
     if not key:
         logger.warning("MinerU 跳过（未配置 MINERU_API_KEY/MINERU_TOKEN）：%s", file_path.name)
-        return '[MinerU失败-需人工确认]'
+        return _FAIL_BLOCKED
 
     try:
         import requests
@@ -377,87 +379,93 @@ def extract_via_mineru(
         raise RuntimeError("requests 未安装") from exc
 
     apply_url = f"{base}{_MINERU_APPLY_PATH}"
-    # HTML 文件需明确指定 MinerU-HTML
     if file_path.suffix.lower() == '.html':
         mv = 'MinerU-HTML'
-    # 稳定的 data_id，便于追踪
     data_id = _file_hash(file_path)[:32]
 
-    # MinerU 官方流程：申请上传链接 → 上传 → 轮询 → 下载 ZIP
-    try:
-        # 1. 申请上传链接（payload: files 数组 + model_version）
-        apply_resp = requests.post(
-            apply_url,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "files": [{"name": file_path.name, "data_id": data_id}],
-                "model_version": mv,
-                "enable_formula": True,
-                "enable_table": True,
-                "language": "ch",
-            },
-            timeout=30,
-        )
-        apply_resp.raise_for_status()
-        apply_data = apply_resp.json()
-        # 官方要求校验 code == 0（HTTP 200 也可能 code != 0）
-        if apply_data.get("code") != 0:
-            raise RuntimeError(f"MinerU apply 失败：{apply_data.get('msg', '未知错误')}")
-        batch_id = apply_data.get("data", {}).get("batch_id")
-        upload_urls = apply_data.get("data", {}).get("file_urls", [])
-        upload_url = upload_urls[0] if upload_urls else None
-        if not upload_url:
-            raise RuntimeError("MinerU 未返回上传链接")
-
-        # 2. 上传文件（官方要求不设置 Content-Type）
-        with open(file_path, 'rb') as f:
-            upload_resp = requests.put(upload_url, data=f, timeout=120)
-            upload_resp.raise_for_status()
-
-        # 3. 轮询结果（路径参数：/api/v4/extract-results/batch/{batch_id}）
-        for _ in range(30):
-            poll_url = f"{base}{_MINERU_POLL_PATH_TMPL.format(batch_id=batch_id)}"
-            poll_resp = requests.get(
-                poll_url,
-                headers={"Authorization": f"Bearer {key}"},
+    last_error = ''
+    for attempt in range(1, max_retries + 1):
+        try:
+            # 1. 申请上传链接
+            apply_resp = requests.post(
+                apply_url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "files": [{"name": file_path.name, "data_id": data_id}],
+                    "model_version": mv,
+                    "enable_formula": True,
+                    "enable_table": True,
+                    "language": "ch",
+                },
                 timeout=30,
             )
-            poll_resp.raise_for_status()
-            poll_data = poll_resp.json()
-            if poll_data.get("code") != 0:
-                logger.warning("MinerU 轮询错误 %s: %s", file_path.name, poll_data.get("msg"))
-                break
-            results = poll_data.get("data", {}).get("extract_result", [])
-            if not results:
+            apply_resp.raise_for_status()
+            apply_data = apply_resp.json()
+            if apply_data.get("code") != 0:
+                raise RuntimeError(f"MinerU apply 失败：{apply_data.get('msg', '未知错误')}")
+            batch_id = apply_data.get("data", {}).get("batch_id")
+            upload_urls = apply_data.get("data", {}).get("file_urls", [])
+            upload_url = upload_urls[0] if upload_urls else None
+            if not upload_url:
+                raise RuntimeError("MinerU 未返回上传链接")
+
+            # 2. 上传文件
+            with open(file_path, 'rb') as f:
+                upload_resp = requests.put(upload_url, data=f, timeout=120)
+                upload_resp.raise_for_status()
+
+            # 3. 轮询结果
+            for _ in range(30):
+                poll_url = f"{base}{_MINERU_POLL_PATH_TMPL.format(batch_id=batch_id)}"
+                poll_resp = requests.get(
+                    poll_url,
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=30,
+                )
+                poll_resp.raise_for_status()
+                poll_data = poll_resp.json()
+                if poll_data.get("code") != 0:
+                    logger.warning("MinerU 轮询错误 %s: %s", file_path.name, poll_data.get("msg"))
+                    break
+                results = poll_data.get("data", {}).get("extract_result", [])
+                if not results:
+                    time.sleep(2)
+                    continue
+                state = results[0].get("state", "")
+                if state == "done":
+                    zip_url = results[0].get("full_zip_url", "")
+                    if zip_url:
+                        zip_resp = requests.get(zip_url, timeout=120)
+                        zip_resp.raise_for_status()
+                        text = _mineru_extract_text_from_zip(zip_resp.content, file_path.name)
+                        if not _is_fail_marker(text):
+                            cache_path.write_text(text, encoding='utf-8')
+                        if attempt > 1:
+                            logger.info("MinerU 重试成功 (attempt %d/%d): %s", attempt, max_retries, file_path.name)
+                        return text
+                    break
+                elif state == "failed":
+                    err_msg = results[0].get("err_msg", "")
+                    raise RuntimeError(f"MinerU 解析失败：{err_msg}")
                 time.sleep(2)
-                continue
-            state = results[0].get("state", "")
-            if state == "done":
-                zip_url = results[0].get("full_zip_url", "")
-                if zip_url:
-                    zip_resp = requests.get(zip_url, timeout=120)
-                    zip_resp.raise_for_status()
-                    text = _mineru_extract_text_from_zip(zip_resp.content, file_path.name)
-                    if not _is_fail_marker(text):
-                        cache_path.write_text(text, encoding='utf-8')
-                    return text
-                break
-            elif state == "failed":
-                err_msg = results[0].get("err_msg", "")
-                logger.warning("MinerU 解析失败 %s: %s", file_path.name, err_msg)
-                return f'[MinerU提取失败-需人工确认]'
-            # waiting-file / pending / running / converting → 继续轮询
-            time.sleep(2)
 
-        logger.warning("MinerU 提取未完成 %s", file_path.name)
-        return '[MinerU提取失败-需人工确认]'
+            raise RuntimeError("MinerU 轮询超时")
 
-    except Exception as exc:
-        logger.warning("MinerU 提取失败 %s: %s", file_path.name, exc)
-        return '[MinerU失败-需人工确认]'
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < max_retries:
+                wait = 2 ** attempt  # 2, 4, 8s
+                logger.warning("MinerU 失败 %s (attempt %d/%d): %s — %ds 后重试",
+                               file_path.name, attempt, max_retries, last_error, wait)
+                time.sleep(wait)
+            else:
+                logger.warning("MinerU 重试耗尽 %s (attempt %d/%d): %s",
+                               file_path.name, attempt, max_retries, last_error)
+
+    return _FAIL_BLOCKED
 
 
 def extract_via_mineru_batch(

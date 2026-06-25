@@ -115,7 +115,7 @@ def _preprocess_raw_files(input_path: Path, output_path: Path, *, skip_ocr: bool
             (extract_dir / f"{raw_file.stem}.md").write_text('', encoding='utf-8')
         return extract_dir
 
-    from scripts.route_ocr import extract_text, extract_via_mineru_batch, route_ocr
+    from scripts.route_ocr import extract_text, extract_via_mineru_batch, extract_via_mineru, route_ocr
 
     # 第一步：路由所有文件，区分 mineru 和非 mineru
     mineru_files: List[Path] = []
@@ -124,28 +124,66 @@ def _preprocess_raw_files(input_path: Path, output_path: Path, *, skip_ocr: bool
         try:
             engine = route_ocr(raw_file)
         except Exception:
-            engine = 'mineru'  # 默认走 mineru
+            engine = 'mineru'  # 路由失败默认走 mineru
         if engine == 'mineru':
             mineru_files.append(raw_file)
         else:
             other_files.append(raw_file)
 
-    # 第二步：批量处理 mineru 文件（一次 API 调用 ≤50 文件，解决逐文件串行慢的问题）
-    if mineru_files:
-        logger.info("MinerU 批量处理 %d 个文件...", len(mineru_files))
+    # 第二步：智能选择 single vs batch mineru
+    #   - PDF 页数 >10 → batch 候选
+    #   - 总文件数 >5 且有 batch 候选 → 全部走 batch（一次批处理更简洁）
+    #   - 否则 → 全部走 single（少量小文件，single 更快更少开销）
+    BIG_PDF_THRESHOLD = 10
+    try:
+        import fitz  # PyMuPDF 判断 PDF 页数
+    except ImportError:
+        fitz = None
+
+    has_big_pdf = False
+    for f in mineru_files:
+        if fitz and f.suffix.lower() == '.pdf':
+            try:
+                doc = fitz.open(str(f))
+                if doc.page_count > BIG_PDF_THRESHOLD:
+                    has_big_pdf = True
+                doc.close()
+            except Exception:
+                pass
+
+    use_batch = has_big_pdf or len(mineru_files) > 5
+
+    if use_batch:
+        batch_files = mineru_files
+        single_files = []
+    else:
+        batch_files = []
+        single_files = mineru_files
+
+    # 第三步：处理单文件 mineru（带重试，fast path）
+    for raw_file in single_files:
+        logger.info("处理原始文件(MinerU single): %s", raw_file.name)
+        md_path = extract_dir / f"{raw_file.stem}.md"
+        text = extract_via_mineru(raw_file, extract_dir=extract_dir)
+        md_path.write_text(text if text else '', encoding='utf-8')
+        logger.info("OCR 完成: %s -> %s (%d 字符)", raw_file.name, md_path.name, len(text or ''))
+
+    # 第四步：批量处理 mineru 文件（一次 API 调用 ≤50 文件）
+    if batch_files:
+        logger.info("MinerU 批量处理 %d 个文件（含大PDF/多文件场景）...", len(batch_files))
         batch_results = extract_via_mineru_batch(
-            mineru_files,
+            batch_files,
             extract_dir=extract_dir,
         )
-        for raw_file in mineru_files:
+        for raw_file in batch_files:
             md_path = extract_dir / f"{raw_file.stem}.md"
             text = batch_results.get(raw_file, '')
             md_path.write_text(text if text else '', encoding='utf-8')
             logger.info("OCR 完成: %s -> %s (%d 字符)", raw_file.name, md_path.name, len(text or ''))
 
-    # 第三步：处理非 mineru 文件（逐文件，数量少且不需要 API）
+    # 第五步：处理非 mineru 文件（逐文件，local_pdf 等）
     for raw_file in other_files:
-        logger.info("处理原始文件: %s", raw_file.name)
+        logger.info("处理原始文件(%s): %s", route_ocr(raw_file), raw_file.name)
         md_path = extract_dir / f"{raw_file.stem}.md"
         try:
             text = extract_text(raw_file, extract_dir=extract_dir)
