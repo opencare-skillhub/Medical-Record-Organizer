@@ -1,0 +1,33 @@
+[project]
+name = "patient-record-organizer"
+version = "1.0.0"
+description = "病例档案整理助手 — 将零散医疗资料结构化归档为病例报告"
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+dependencies = [
+    "PyMuPDF>=1.25.0",
+    "Jinja2>=3.1.0",
+    "python-docx>=1.0.0",
+    "markdown>=3.5.0",
+    "requests>=2.31.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+ocr = [
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
+]
+test = [
+    "pytest>=7.4.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["scripts*"]

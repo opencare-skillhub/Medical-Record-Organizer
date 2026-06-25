@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-临时 OCR 预处理脚本：把 test_data 目录中的图片/PDF 转成 .md 文本。
-调用 SiliconFlow DeepSeek OCR API（.env 已配置）。
+[已废弃] 临时 OCR 预处理脚本：把 test_data 目录中的图片/PDF 转成 .md 文本。
+
+⚠️ 本脚本已废弃：使用 `/ocr`+`image` 的接口形态与 route_ocr.py 统一实现冲突。
+   请改用：
+     `python3 xyb process <dir>`  —— 一键管线（自动 OCR 预处理 + v2 流水线）
+   或 `python3 scripts/v2/pipeline_v2.py --input-dir <dir> --output-dir <out>`
+仅保留用于历史兼容，其 `/ocr`+`image` 形态未与 SiliconFlow 实际接口对齐。
 """
 import base64
 import json

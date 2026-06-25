@@ -265,6 +265,8 @@ def _normalize_lab_item(raw: Dict[str, Any], fallback_date: str = '') -> Dict[st
         'ref_high': ref_high,
         'abnormal': abnormal,
         'flag': flag,
+        'fluctuation': raw.get('fluctuation', ''),
+        'note': raw.get('note', ''),
     }
 
 
@@ -345,6 +347,8 @@ def merge_lab_trends(lab_group: List[Dict[str, Any]]) -> Dict[str, Any]:
                 'abnormal': lv.get('abnormal'),
                 'flag': lv.get('flag', ''),
                 'source': report.get('_source_file', ''),
+                'fluctuation': lv.get('fluctuation', ''),
+                'note': lv.get('note', ''),
             })
 
     for name in trends:

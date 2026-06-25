@@ -117,24 +117,52 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             break
 
     # ---- timeline ----
+    _RT_LABELS = {
+        'pathology': '病理报告', 'lab_results': '检验报告', 'imaging': '影像检查',
+        'medication': '用药记录', 'clinical_records': '门诊/住院记录', 'basic_info': '基本信息',
+    }
     timeline: List[Dict[str, Any]] = []
     for item in all_items:
         date = item.get('document_date') or item.get('report_date') or ''
         if not date:
             continue
+        rt = item.get('report_type', '')
+        # 更精确的标签：基因检测区别于普通病理
+        if rt == 'pathology':
+            label = '基因检测报告' if item.get('test_items') else '病理报告'
+        else:
+            label = _RT_LABELS.get(rt, item.get('_source_file', ''))
         note_parts = []
-        findings = item.get('findings')
-        if isinstance(findings, list):
-            note_parts.extend(str(f) for f in findings if f)
-        elif isinstance(findings, str) and findings:
-            note_parts.append(findings)
+        # 优先用结论
         if item.get('conclusion'):
             note_parts.append(str(item['conclusion']))
+        # 结构化 diagnoses
+        for diag in (item.get('diagnoses') or []):
+            if isinstance(diag, dict) and diag.get('name'):
+                note_parts.append(f"诊断: {diag['name']}")
+        # 关键突变摘要
+        test_items = item.get('test_items') or []
+        if test_items:
+            genes_str = ', '.join(
+                f"{g.get('gene_name','')} {g.get('detection_result','')}"[:40]
+                for g in test_items[:6] if isinstance(g, dict)
+            )
+            if genes_str:
+                note_parts.append(f"关键突变: {genes_str}")
+        # CT 影像所见（裁短）
+        findings = item.get('findings')
+        if isinstance(findings, list):
+            for f in findings:
+                if isinstance(f, str) and len(f) > 10:
+                    note_parts.append(f[:200])
+        elif isinstance(findings, str) and len(findings) > 10:
+            note_parts.append(findings[:200])
+        note = '；'.join(note_parts)[:400]
         timeline.append({
             'dates': [date],
-            'title': item.get('_source_file', ''),
-            'category': item.get('report_type', ''),
-            'note': '；'.join(note_parts)[:200],
+            'title': f"{date[:7]}: {label}",
+            'category': rt,
+            'note': note or '待添加',
         })
     timeline.sort(key=lambda x: x['dates'][0] if x['dates'] else '')
 
@@ -152,11 +180,28 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             'label': item.get('_source_file', ''),
             'type': item.get('specimen_type', '') or '病理',
             'date': date,
-            'summary': '；'.join(summary_parts) or '详见报告',
+            'summary': '；'.join(summary_parts) or '待添加',
             'findings': findings or [],
             'value': '',
             'is_critical': False,
         })
+
+    # ---- 病理兜底：无结构化数据时从原文读取 ----
+    if not any(p.get('findings') for p in pathology) and (groups.get('pathology') or []):
+        for item in (groups.get('pathology') or []):
+            fname = item.get('_source_file', '')
+            src_dir = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+            if src_dir and src_dir.exists():
+                raw = src_dir.read_text(encoding='utf-8')
+                # 找病理诊断关键行
+                import re
+                diag_match = re.search(r'病理诊断[：:].*?(?=\n\n|\Z)', raw, re.DOTALL)
+                if diag_match:
+                    for p in pathology:
+                        if p['label'] == fname:
+                            p['summary'] = diag_match.group(0).strip()[:300]
+                            p['value'] = raw[:500]
+                            break
 
     # ---- genetic_highlights ----
     genetic_highlights: List[Dict[str, Any]] = []
@@ -171,6 +216,17 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             tags = []
             if gene.get('clinical_significance'):
                 tags.append(gene['clinical_significance'])
+            # 证据等级分级标签
+            tier = (gene.get('evidence_tier') or '').strip().upper()
+            tier_label = ''
+            if tier in ('1A', '1B'):
+                tier_label = 'I类'
+            elif tier in ('2A', '2B'):
+                tier_label = 'II类'
+            elif tier == '3':
+                tier_label = 'III类'
+            elif tier:
+                tier_label = tier
             genetic_highlights.append({
                 'category': 'gene',
                 'gene': gene.get('gene_name', ''),
@@ -179,8 +235,39 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 'result': result,
                 'pathogenic': pathogenic,
                 'is_critical': pathogenic or False,
+                'abundance': gene.get('abundance', ''),
+                'evidence_tier': tier,
+                'tier_label': tier_label,
                 'tags': tags,
             })
+
+    # 按证据等级排序：1A→1B→2A→2B→3→无
+    _TIER_ORDER = {'1A': 1, '1B': 2, '2A': 3, '2B': 4, '3': 5}
+    genetic_highlights.sort(key=lambda x: _TIER_ORDER.get(x.get('evidence_tier', ''), 99))
+
+    # ---- genetic_highlights 兜底：LLM 返回空时用 parse_genetics 从原文提取 ----
+    if not genetic_highlights and (groups.get('pathology') or []):
+        from scripts.parse_genetics import parse_genetics
+        combined = ''
+        for item in (groups.get('pathology') or []):
+            fname = item.get('_source_file', '')
+            src_dir = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+            if src_dir and src_dir.exists():
+                combined += '\n' + src_dir.read_text(encoding='utf-8')
+        if combined:
+            highlights = parse_genetics(combined)
+            for h in highlights:
+                genetic_highlights.append({
+                    'category': 'gene', 'gene': h.gene,
+                    'marker': h.gene, 'mutation': h.mutation or h.position,
+                    'result': h.mutation or h.position,
+                    'pathogenic': h.pathogenic,
+                    'is_critical': h.pathogenic,
+                    'abundance': h.abundance or '',
+                    'evidence_tier': '',
+                    'tier_label': '',
+                    'tags': [h.drug_sensitivity] if h.drug_sensitivity else [],
+                })
 
     # ---- medication ----
     medication_summary: List[Dict[str, Any]] = []
@@ -260,7 +347,8 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 'date': tr.get('date', ''),
                 'value': val,
                 'change': _format_change(val, prev_val),
-                'note': '异常' if tr.get('abnormal') else '',
+                'fluctuation': tr.get('fluctuation', ''),
+                'note': tr.get('note', ''),
                 'is_abnormal': bool(tr.get('abnormal')),
             })
             prev_val = val
@@ -280,6 +368,116 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                     row[std] = tr.get('value', '')
                     break
         lab_trend_rows.append(row)
+
+    # ---- 通用检验指标表（非肿瘤标志物 + 单日期场景兜底） ----
+    lab_flat: List[Dict[str, Any]] = []
+    for indicator, data in lab_trends.items():
+        if _is_tumor_marker(indicator):
+            continue  # 肿瘤标志物已在 tumor_marker_tables 里
+        for tr in data.get('trend', []):
+            abnormal = tr.get('abnormal')
+            lab_flat.append({
+                'name': indicator,
+                'value': tr.get('value', ''),
+                'unit': tr.get('unit', ''),
+                'date': tr.get('date', ''),
+                'abnormal': bool(abnormal),
+            })
+            break  # 每个指标只取最近一个值
+
+    # ---- 检验分区与异常卡片 ----
+    _LAB_CATEGORIES = {
+        '肿瘤标志物': {'CEA','CA199','CA125','CA724','CA242','CA50','CA153','AFP','PSA','糖类抗原','癌胚抗原'},
+        '肝功能': {'ALT','AST','GGT','ALP','TBIL','DBIL','IBIL','TP','ALB','GLB','A/G','前白蛋白','甘胆酸','LDH','总胆红素','直接胆红素','白蛋白','转氨酶'},
+        '肾功能': {'CREA','BUN','UREA','UA','eGFR','肌酐','尿素','尿酸','肾小球'},
+        '血常规': {'WBC','RBC','Hb','HCT','PLT','NEU','LYM','MONO','EO','BASO','白细胞','红细胞','血红蛋白','血小板','中性粒','淋巴'},
+        '电解质': {'K','Na','Cl','Ca','P','Mg','钾','钠','氯','钙','磷','镁','碳酸氢根'},
+        '血脂血糖': {'TG','TC','HDL','LDL','GLU','血糖','甘油三酯','总胆固醇','脂蛋白','sd-LDL'},
+        '凝血功能': {'PT','APTT','INR','D-二聚体','纤维蛋白原','FIB','TT'},
+        '其他': set(),
+    }
+
+    def _classify_lab(name: str) -> str:
+        upper = name.upper()
+        for cat, keywords in _LAB_CATEGORIES.items():
+            for kw in keywords:
+                if kw in upper or kw in name:
+                    return cat
+        return '其他'
+
+    # 指标分类
+    categorized: Dict[str, List[Dict[str, Any]]] = {}
+    for indicator, data in lab_trends.items():
+        cat = _classify_lab(indicator)
+        categorized.setdefault(cat, [])
+        for tr in data.get('trend', []):
+            categorized[cat].append({
+                'name': indicator, 'value': tr.get('value',''), 'unit': tr.get('unit',''),
+                'date': tr.get('date',''), 'abnormal': bool(tr.get('abnormal', False)),
+                'flag': tr.get('flag',''), 'ref_low': data.get('ref_range',(None,None))[0] if isinstance(data.get('ref_range'), (tuple, list)) else None,
+                'ref_high': data.get('ref_range',(None,None))[1] if isinstance(data.get('ref_range'), (tuple, list)) else None,
+            })
+            break
+    # 去掉空分类
+    categorized = {k: v for k, v in categorized.items() if v and k != '其他'}
+    # 异常指标抢眼展示（卡片格式）
+    lab_abnormal: List[Dict[str, Any]] = []
+    for items in categorized.values():
+        for it in items:
+            if it['abnormal']:
+                lab_abnormal.append(it)
+    categorized_lab = [{'category': k, 'items': v} for k, v in categorized.items()]
+
+    # ---- lab_analysis_conclusion (检验分析结论) ----
+    lab_analysis_conclusion = ''
+    for item in (groups.get('lab') or []):
+        if item.get('lab_analysis_conclusion'):
+            lab_analysis_conclusion = item['lab_analysis_conclusion']
+            break
+
+    # ---- clinical_summary (临床摘要) ----
+    clinical_summary = ''
+    for item in (groups.get('clinical') or []):
+        if item.get('clinical_summary'):
+            clinical_summary = item['clinical_summary']
+            break
+
+    # ---- pathology_diagnosis (病理诊断要点) ----
+    pathology_diagnosis: Optional[Dict[str, Any]] = None
+    for item in (groups.get('pathology') or []):
+        pd = item.get('pathology_diagnosis')
+        if pd:
+            # LLM 有时返回 list/str 而非 dict，做防御性处理
+            if not isinstance(pd, dict):
+                logger.warning('pathology_diagnosis 非 dict (type=%s)，跳过: %s', type(pd).__name__, str(pd)[:100])
+                continue
+            pathology_diagnosis = pd
+            break
+
+    # ---- ihc_markers (免疫组化) ----
+    ihc_items: List[Dict[str, Any]] = []
+    for item in (groups.get('pathology') or []):
+        for m in (item.get('ihc_markers') or []):
+            if isinstance(m, dict):
+                ihc_items.append(m)
+
+    # ---- pd_l1 ----
+    pd_l1: Optional[Dict[str, Any]] = None
+    for item in (groups.get('pathology') or []):
+        pl = item.get('pd_l1')
+        if pl:
+            if not isinstance(pl, dict):
+                logger.warning('pd_l1 非 dict (type=%s)，跳过: %s', type(pl).__name__, str(pl)[:100])
+                continue
+            pd_l1 = pl
+            break
+
+    # ---- timeline_items (临床时间轴) ----
+    timeline_items: List[Dict[str, Any]] = []
+    for item in (groups.get('clinical') or []):
+        for t in (item.get('timeline_items') or []):
+            if isinstance(t, dict):
+                timeline_items.append(t)
 
     # chart_svg_ca199（保留兼容）
     chart_svg_ca199 = ''
@@ -403,6 +601,9 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         'imaging_summary': imaging_summary,
         'tumor_marker_tables': tumor_marker_tables,
         'lab_trend': lab_trend_rows,
+        'lab_flat': lab_flat,
+        'lab_abnormal': lab_abnormal,
+        'categorized_lab': categorized_lab,
         'chart_svg_ca199': chart_svg_ca199,
         'chart_svg': chart_svg,
         'chart_svg_normalized': chart_svg_normalized,
@@ -414,6 +615,14 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         'gaps': gaps,
         'updated_at': profile.get('generated_at', ''),
         'report_title': report_title,
+        'lab_analysis_conclusion': lab_analysis_conclusion,
+        'clinical_summary': clinical_summary,
+        'pathology_diagnosis': pathology_diagnosis,
+        'ihc_items': ihc_items,
+        'pd_l1': pd_l1,
+        'timeline_items': timeline_items,
+        'pancreatic_consensus_link': 'https://mp.weixin.qq.com/s/Vpn2oH9cDgsOPg5oekvwCg',
+        'pancreatic_consensus_text': '胰腺癌精准检测与分子诊断中国专家共识（2025版）',
     }
     return ctx
 

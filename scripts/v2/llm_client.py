@@ -49,8 +49,8 @@ _PROVIDERS: Dict[str, Dict[str, Any]] = {
 }
 
 # 默认模型规格（未配置 env 时兜底）
-_DEFAULT_PRIMARY = 'stepfun:step-3.5-flash'
-_DEFAULT_FALLBACKS = 'stepfun:step-3.5-flash,siliconflow:deepseek-ai/DeepSeek-V4-Flash'
+_DEFAULT_PRIMARY = 'siliconflow:deepseek-ai/DeepSeek-V4-Flash'
+_DEFAULT_FALLBACKS = 'siliconflow:deepseek-ai/DeepSeek-V4-Flash,stepfun:step-3.5-flash'
 
 
 # ---------------------------------------------------------------------------
@@ -188,27 +188,17 @@ def extract_structured(
     *,
     model: Optional[str] = None,
     system_prompt: str = '',
-    max_chars: int = 12000,
+    max_chars: int = 0,  # 0 = 不截断，百万上下文模型
 ) -> Dict[str, Any]:
-    """结构化提取的便捷封装，内置智能截断（C8）。
-
-    截断策略：保留开头（含报告类型/关键指标）和结尾（含结论），并标注截断。
-    """
-    truncation_note = ''
-    if len(text) > max_chars:
-        truncation_note = f'\n[文本已截断，原始长度 {len(text)} 字符]'
-        head = text[:max_chars - 500]
-        tail = text[-400:]
-        truncated = head + '\n...\n' + tail
-    else:
-        truncated = text
+    """结构化提取的便捷封装（百万上下文模型不截断）。"""
+    truncated = text
 
     messages = []
     if system_prompt:
         messages.append({'role': 'system', 'content': system_prompt})
     messages.append({
         'role': 'user',
-        'content': f'{truncated}{truncation_note}',
+        'content': truncated,
     })
 
     return call_llm_with_retry(messages, schema, model=model)

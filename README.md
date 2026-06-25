@@ -5,18 +5,28 @@
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
+# 1. 安装核心依赖
 pip install -r requirements.txt
+
+# 1b.（可选）离线 OCR 兜底：pytesseract + Pillow
+#     仅当云端 MinerU + SiliconFlow DeepSeek-OCR 全部失败时才触发，主链路无需。
+#     pip install -r requirements-ocr.txt
+#     另需系统装 tesseract 二进制 + 中文语言包（pip 装不了）：
+#       macOS:        brew install tesseract tesseract-lang
+#       Debian/Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim
 
 # 2. 配置 API Key
 cp .env.example .env
 # 编辑 .env，填入以下环境变量：
-# - OCR_API_KEY / OCR_BASE_URL / OCR_MODEL：SiliconFlow DeepSeek-OCR fallback（可选）
-# - MINERU_API_KEY 或 MINERU_TOKEN：复杂/扫描 PDF、图片深度解析（可选）
-# - STEP_API_KEY：录音转写（必填，如需 ASR）
+# - OCR_API_KEY / OCR_BASE_URL / OCR_MODEL：SiliconFlow DeepSeek-OCR（模型 deepseek-ai/DeepSeek-OCR，base https://api.siliconflow.cn/v1）
+# - MINERU_API_KEY 或 MINERU_TOKEN：图片/扫描 PDF 深度解析（需配合 MINERU_API_URL=https://mineru.net）
+# - STEP_API_KEY：录音转写（如需 ASR）
 # - EDGEONE_PAGES_API_TOKEN：发布到 EdgeOne Pages（可选）
 
-# 3. 运行测试
+# 3. 依赖自检（xyb process 前会自动跑；也可单独跑）
+python3 xyb preflight
+
+# 4. 运行测试
 pytest tests/ -v
 ```
 
@@ -171,6 +181,8 @@ patient-record-organizer/
 - ❌ 不给出治疗建议
 - ❌ 不替代医嘱和处方
 - ✅ 只做"资料整理与结构化归档"
+
+**🔒 隐私保护**：全部上传数据在送入云端 LLM 之前已完成**自动脱敏**（正则替换姓名/电话/身份证/地址等，保留所有医学术语）。脱敏映射写入 `mappings.json` 本地文件，可用于后续回填原始值。**任何人名上传后即被替换为 `[NAME_N]` 占位符**，不会泄露给云端 API。
 
 所有输出附带免责声明，不构成医学诊断或治疗建议。
 

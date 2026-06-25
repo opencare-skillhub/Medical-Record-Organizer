@@ -58,6 +58,36 @@ def test_route_scanned_pdf(pdf_file, monkeypatch):
     assert ro.route_ocr(pdf_file) == "mineru"
 
 
+# ③b 文字型 PDF 但有图片 → 也应路由到 mineru（如 38 页基因报告含图表）
+def test_route_pdf_text_based_with_images_routes_to_mineru(pdf_file, monkeypatch):
+    monkeypatch.setattr(ro, "detect_pdf_type", lambda _p: {
+        "page_count": 38,
+        "is_text_based": True,
+        "has_images": True,
+    })
+    assert ro.route_ocr(pdf_file) == "mineru"
+
+
+# ③c 纯文字 PDF 超过5页 → 送给 MinerU 深度解析
+def test_route_pdf_large_text_only_routes_to_mineru(pdf_file, monkeypatch):
+    monkeypatch.setattr(ro, "detect_pdf_type", lambda _p: {
+        "page_count": 10,
+        "is_text_based": True,
+        "has_images": False,
+    })
+    assert ro.route_ocr(pdf_file) == "mineru"
+
+
+# ③d 纯文字小 PDF ≤5页且无图片 → PyMuPDF（不变）
+def test_route_pdf_small_text_no_images(pdf_file, monkeypatch):
+    monkeypatch.setattr(ro, "detect_pdf_type", lambda _p: {
+        "page_count": 5,
+        "is_text_based": True,
+        "has_images": False,
+    })
+    assert ro.route_ocr(pdf_file) == "local_pdf"
+
+
 # ④ 路由函数不实际发请求（detect_pdf_type 被 monkeypatch，不调用 fitz）
 def test_route_does_not_open_real_fitz(pdf_file, monkeypatch):
     called = {}
@@ -369,4 +399,273 @@ def test_extract_text_local_pdf_uses_pymupdf(monkeypatch, tmp_dir):
     )
     assert text == "local pdf text"
     assert calls["local"] == 1
+
+
+# ── Phase 2: MinerU 官方文档对齐测试 ─────────────────────────────────
+
+
+def test_mineru_default_base_url_not_v1_doubled():
+    """默认 base 不应出现 /v1 或 /api/v4 段，避免拼出 /v1/api/v4/... 错误路径。"""
+    base = ro._resolve_mineru_base()
+    assert base == "https://mineru.net"
+    assert "/v1" not in base
+    assert "/api/v4" not in base
+
+
+def test_mineru_base_strips_misconfigured_suffix():
+    """误填带 /v1 或 /api/v4 的完整路径时应被裁回 base。"""
+    assert ro._resolve_mineru_base("https://api.mineru.cn/v1") == "https://api.mineru.cn"
+    assert ro._resolve_mineru_base("https://mineru.net/api/v4/file-urls/batch") == "https://mineru.net"
+    assert ro._resolve_mineru_base("https://mineru.net/api/v4") == "https://mineru.net"
+
+
+def test_mineru_apply_uses_files_array_payload(monkeypatch, tmp_dir):
+    """apply payload 必须用 files 数组 + model_version，而非旧的 file_name。"""
+    captured = {}
+
+    class FakeResp:
+        def __init__(self, payload, status=200):
+            self._p = payload
+            self.status_code = status
+            self.content = b""
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError("HTTP fail")
+        def json(self):
+            return self._p
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["payload"] = json
+        return FakeResp({"code": 0, "data": {"batch_id": "b1", "file_urls": ["https://up"]}})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(ro.time, "sleep", lambda _s: None)
+
+    pdf = tmp_dir / "scan.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    # poll: running -> done
+    poll_call = {"n": 0}
+
+    def fake_get(url, headers=None, timeout=None):
+        poll_call["n"] += 1
+        state = "done" if poll_call["n"] >= 2 else "running"
+        return FakeResp({"code": 0, "data": {"extract_result": [{"state": state, "full_zip_url": ""}]}})
+
+    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr("requests.put", lambda url, data=None, timeout=None: FakeResp({}, status=200))
+
+    ro.extract_via_mineru(pdf, api_key="tok", extract_dir=tmp_dir)
+
+    assert captured["payload"].get("files")
+    assert captured["payload"]["files"][0]["name"] == "scan.pdf"
+    assert "model_version" in captured["payload"]
+    assert "file_name" not in captured["payload"]
+
+
+def test_mineru_poll_uses_path_batch_id(monkeypatch, tmp_dir):
+    """轮询 URL 必须用路径参数 {batch_id}，而非查询参数。"""
+    poll_urls = []
+
+    class FakeResp:
+        def __init__(self, payload, status=200):
+            self._p = payload
+            self.status_code = status
+            self.content = b""
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._p
+
+    monkeypatch.setattr("requests.post", lambda url, headers=None, json=None, timeout=None:
+                        FakeResp({"code": 0, "data": {"batch_id": "BATCH123", "file_urls": ["https://up"]}}))
+    monkeypatch.setattr("requests.put", lambda url, data=None, timeout=None: FakeResp({}, status=200))
+
+    def fake_get(url, headers=None, timeout=None):
+        poll_urls.append(url)
+        return FakeResp({"code": 0, "data": {"extract_result": [{"state": "done", "full_zip_url": ""}]}})
+
+    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr(ro.time, "sleep", lambda _s: None)
+
+    pdf = tmp_dir / "scan.pdf"
+    pdf.write_bytes(b"%PDF fake")
+    ro.extract_via_mineru(pdf, api_key="tok", extract_dir=tmp_dir)
+
+    # 至少一次轮询，URL 含 /batch/BATCH123（路径参数），不含 ?batch_id=
+    assert any("/extract-results/batch/BATCH123" in u for u in poll_urls)
+    assert not any("?batch_id=" in u for u in poll_urls)
+
+
+def test_mineru_token_env_resolution(monkeypatch, tmp_dir):
+    """未传 api_key 时应解析 env：MINERU_API_KEY 优先于 MINERU_TOKEN。"""
+    monkeypatch.setenv("MINERU_API_KEY", "")
+    monkeypatch.setenv("MINERU_TOKEN", "TOKEN_FROM_ENV")
+    assert ro._resolve_mineru_key() == "TOKEN_FROM_ENV"
+
+    monkeypatch.setenv("MINERU_API_KEY", "KEY_FROM_ENV")
+    assert ro._resolve_mineru_key() == "KEY_FROM_ENV"
+
+    # 显式参数最高优先
+    assert ro._resolve_mineru_key("explicit") == "explicit"
+
+
+def test_mineru_skips_when_no_token(monkeypatch, tmp_dir):
+    """无 token 时直接返回失败标记，不发起网络请求。"""
+    monkeypatch.setenv("MINERU_API_KEY", "")
+    monkeypatch.setenv("MINERU_TOKEN", "")
+
+    def boom(*a, **kw):
+        raise AssertionError("无 token 不应发请求")
+
+    monkeypatch.setattr("requests.post", boom)
+    pdf = tmp_dir / "scan.pdf"
+    pdf.write_bytes(b"%PDF fake")
+    text = ro.extract_via_mineru(pdf, extract_dir=tmp_dir)
+    assert text.startswith("[MinerU")
+
+
+def test_mineru_code_nonzero_raises(monkeypatch, tmp_dir):
+    """apply 返回 code!=0（HTTP 200）时应判失败而非当成功。"""
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload; self.status_code = 200; self.content = b""
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._p
+
+    monkeypatch.setattr("requests.post", lambda *a, **kw:
+                        FakeResp({"code": -10002, "msg": "type mismatch for field files"}))
+    monkeypatch.setattr(ro.time, "sleep", lambda _s: None)
+
+    pdf = tmp_dir / "scan.pdf"
+    pdf.write_bytes(b"%PDF fake")
+    text = ro.extract_via_mineru(pdf, api_key="tok", extract_dir=tmp_dir)
+    assert text.startswith("[MinerU")
+
+
+# ── Phase 3: 本地 OCR 兜底测试 ───────────────────────────────────────
+
+
+def test_tesseract_uses_chinese_language(monkeypatch, tmp_dir):
+    """Tesseract 应使用 chi_sim+eng 而非仅 eng。"""
+    captured = {}
+    img = tmp_dir / "a.png"
+    img.write_bytes(b"fake-png")
+
+    class FakeImg:
+        pass
+
+    def fake_itss(img_obj, lang=None):
+        captured["lang"] = lang
+        return "中文 text"
+
+    # 注入 fake pytesseract 模块（本机未装 pytesseract，避免 ModuleNotFoundError）
+    import sys, types
+    fake_ts = types.ModuleType("pytesseract")
+    fake_ts.image_to_string = fake_itss
+    monkeypatch.setitem(sys.modules, "pytesseract", fake_ts)
+
+    class FakePIL:
+        Image = type("I", (), {"open": staticmethod(lambda p: FakeImg())})
+    monkeypatch.setitem(sys.modules, "PIL", FakePIL)
+
+    text = ro._ocr_with_tesseract(img)
+    assert "chi_sim" in (captured.get("lang") or "")
+    assert "中文" in text
+
+
+def test_paddleocr_not_in_default_path():
+    """_ocr_image 不应再调用 PaddleOCR（已移除）。"""
+    assert not hasattr(ro, "_ocr_with_paddle")
+    # _ocr_image 走的应是 tesseract
+    import inspect
+    src = inspect.getsource(ro._ocr_image)
+    assert "tesseract" in src.lower()
+    assert "paddle" not in src.lower()
+
+
+# ── Phase 4: SiliconFlow DeepSeek-OCR 兜底测试 ────────────────────────
+
+
+def test_siliconflow_endpoint_built_from_base(monkeypatch):
+    """endpoint 默认从 base + /chat/completions 构建，单一来源。"""
+    monkeypatch.setenv("OCR_BASE_URL", "https://api.siliconflow.cn/v1")
+    assert ro._sf_endpoint() == "https://api.siliconflow.cn/v1/chat/completions"
+    # 显式 api_url 优先
+    assert ro._sf_endpoint("https://custom/ocr") == "https://custom/ocr"
+
+
+def test_siliconflow_default_model():
+    """默认模型为 deepseek-ai/DeepSeek-OCR。"""
+    assert ro._resolve_sf_model() == "deepseek-ai/DeepSeek-OCR"
+
+
+def test_siliconflow_skips_without_key(monkeypatch, tmp_dir):
+    """无 key 时直接返回失败标记，不发请求。"""
+    monkeypatch.setenv("OCR_API_KEY", "")
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "")
+
+    def boom(*a, **kw):
+        raise AssertionError("无 key 不应发请求")
+
+    monkeypatch.setattr("requests.post", boom)
+    img = tmp_dir / "a.png"
+    img.write_bytes(b"fake")
+    text = ro.ocr_via_siliconflow(img, extract_dir=tmp_dir)
+    assert text.startswith("[OCR失败")
+
+
+def test_siliconflow_failed_result_not_cached(monkeypatch, tmp_dir):
+    """失败标记结果不写入成功缓存，下次可重试。"""
+    monkeypatch.setenv("OCR_API_KEY", "k")
+
+    class FakeResp:
+        def __init__(self, payload, status=500):
+            self._p = payload; self.status_code = status; self.content = b""
+        def raise_for_status(self):
+            raise RuntimeError("HTTP 500")
+        def json(self):
+            return self._p
+
+    img = tmp_dir / "a.png"
+    img.write_bytes(b"fake")
+    cache = ro._cache_path(img, tmp_dir)
+
+    monkeypatch.setattr("requests.post", lambda *a, **kw: FakeResp({}, 500))
+    text = ro.ocr_via_siliconflow(img, extract_dir=tmp_dir)
+    assert text.startswith("[OCR失败")
+    # 失败标记不应落盘
+    assert not cache.exists() or not cache.read_text(encoding="utf-8").startswith("[OCR失败")
+
+
+def test_siliconflow_uses_model_in_payload(monkeypatch, tmp_dir):
+    """payload 必须用 chat/completions 多模态格式：model + messages[image_url/text]。"""
+    captured = {}
+    monkeypatch.setenv("OCR_API_KEY", "k")
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload; self.status_code = 200; self.content = b""
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._p
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["payload"] = json
+        return FakeResp({"choices": [{"message": {"content": "OCR 内容"}}]})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    img = tmp_dir / "a.png"
+    img.write_bytes(b"fake")
+    ro.ocr_via_siliconflow(img, extract_dir=tmp_dir)
+    assert captured["payload"]["model"] == "deepseek-ai/DeepSeek-OCR"
+    msg = captured["payload"]["messages"][0]["content"]
+    assert any(part.get("type") == "image_url" for part in msg)
+    assert any(part.get("type") == "text" for part in msg)
+    # endpoint 是 /chat/completions
+    assert captured["url"].endswith("/chat/completions")
 

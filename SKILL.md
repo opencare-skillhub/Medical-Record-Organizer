@@ -43,11 +43,11 @@ description: >
 
 **目标**：对每个文件进行 OCR/ASR/解析，提取纯文本。
 
-**执行**：
-1. 图片（JPG/PNG/HEIC）：调用 `scripts/route_ocr.py:extract_text()` → 引擎 A（SiliconFlow DeepSeek-OCR）
+**执行**（统一经由 `scripts/route_ocr.py:extract_text()` 路由）：
+1. 图片（JPG/PNG/HEIC）：路由到 MinerU（首选）→ SiliconFlow DeepSeek-OCR（托底）→ Tesseract（离线兜底）
 2. PDF：
-   - 文字型且 ≤5页 → 引擎 A 逐页提取
-   - 复杂/扫描/含表格 → 引擎 B（MinerU，需配置 `MINERU_API_KEY` 和 `MINERU_API_URL`）
+   - 文字型 PDF → PyMuPDF 本地提取（零成本）
+   - 扫描/复杂/含表格 PDF → MinerU（需配置 `MINERU_API_KEY` 或 `MINERU_TOKEN`、`MINERU_API_URL`）→ SiliconFlow DeepSeek-OCR（托底）
 3. 录音（MP3/M4A/WAV）：调用 `scripts/asr_stepfun.py:transcribe()` → 引擎 C（SSE，StepAudio 2.5，默认）
    - 仅当需词级字幕对齐 / 双声道分离 / 本地超长文件已有公网 URL 时，提示用户需走引擎 D（异步，1期接口预留）
 4. Word（.docx）：直接读取文本
@@ -115,9 +115,11 @@ description: >
 **目标**：按 `references/case-report-template.md` 结构生成病例档案。
 
 **执行**：
-1. 调用 `scripts/render_report.py:render_md()` 生成 Markdown
-2. 调用 `scripts/render_report.py:render_html()` 生成 HTML（需安装 `markdown` 库）
-3. 可选：调用外部工具生成 PDF（weasyprint，V2 启用）和 DOCX（pandoc/python-docx，V2 启用）
+1. 调用 `scripts/v2/pipeline_v2.py:run_pipeline()` 一键完成脱敏→Map→Shuffle→Reduce→MDT→渲染全流程
+2. 或分步调用：
+   - `scripts/v2/render_html.py:render_html_report(profile, groups, output_dir)` 生成 HTML（Jinja2 模板）
+   - `scripts/render_md.py:render_md(profile, groups, output_path)` 生成 Markdown（Jinja2 模板）
+3. 可选：调用外部工具生成 PDF（weasyprint）和 DOCX（pandoc/python-docx）
 
 **输出格式**：
 - Markdown（.md）：知识库归档、版本控制
@@ -297,9 +299,17 @@ python scripts/asr_stepfun.py tests/fixtures/voice_memo.mp3
 # 5. 分类
 python scripts/classify.py tests/fixtures/extracted_sample.txt
 
-# 6. 生成报告
-python scripts/render_report.py --patient P001 --format md
-python scripts/render_report.py --patient P001 --format html
+# 6. 生成报告（一键 v2 pipeline，支持原始图片/PDF 自动 OCR）
+python scripts/v2/pipeline_v2.py --input-dir ~/Downloads/病历资料/ --output-dir ~/patients/P001/output/ --patient-id P001
+
+# 或用 xyb CLI（推荐入口）
+python3 xyb process ~/Downloads/病历资料/ --patient P001 --output-dir ~/patients/P001/output/
+
+# 或分步渲染
+python -c "
+from scripts.v2.pipeline_v2 import run_pipeline
+run_pipeline(input_dir='~/Downloads/病历资料/', output_dir='~/patients/P001/output/', patient_id='P001')
+"
 ```
 
 ---
@@ -309,10 +319,12 @@ python scripts/render_report.py --patient P001 --format html
 ### OCR 路由
 
 ```
-图片 → DeepSeek-OCR（SiliconFlow）
-文字型 PDF ≤5页 → DeepSeek-OCR 逐页
-复杂/扫描 PDF → MinerU
+文字型 PDF  → PyMuPDF（本地，零成本）
+图片/扫描PDF → MinerU（官方文档对齐，需 MINERU_API_KEY 或 MINERU_TOKEN）
+            → SiliconFlow DeepSeek-OCR（最后云端托底）
+            → Tesseract chi_sim+eng（可选离线兜底）
 ```
+注：PaddleOCR 已移除；DeepSeek-OCR 模型 `deepseek-ai/DeepSeek-OCR`，base `https://api.siliconflow.cn/v1`。
 
 ### ASR 路由（PRD 6.4）
 
@@ -346,6 +358,6 @@ python scripts/render_report.py --patient P001 --format html
 | T3 | OCR 双引擎路由 scripts/route_ocr.py | ✅ |
 | T4 | 两层分类 + 日期提取 scripts/classify.py | ✅ |
 | T8 | ASR 引擎 C (StepAudio 2.5 SSE) scripts/asr_stepfun.py | ✅ |
-| T5 | 报告渲染器 scripts/render_report.py | ✅ |
+| T5 | 报告渲染器 scripts/v2/render_html.py + scripts/render_md.py | ✅ |
 | T6 | 报告模板精修 references/case-report-template.md | ✅ |
 | T7 | SKILL.md 工作流串联 | ✅ |

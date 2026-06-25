@@ -1,0 +1,20 @@
+# 可选离线 OCR 兜底依赖
+# ─────────────────────────────────────────────────────────────
+# 仅当云端 MinerU + SiliconFlow DeepSeek-OCR 全部失败时才会触发本地 OCR。
+# 主链路（MinerU + SF）为云 API，无需这些包即可正常工作。
+#
+# 安装：
+#   pip install -r requirements-ocr.txt
+#
+# ⚠️ pytesseract 还需要系统级 tesseract 二进制 + 中文语言包（pip 装不了）：
+#   macOS:  brew install tesseract tesseract-lang     (tesseract-lang 含 chi_sim)
+#   Debian/Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim
+#   Windows: 安装 tesseract 后在 .env 设 TESSDATA_PREFIX 指向 tessdata 目录
+#
+# PaddleOCR 已移除：与已装版本不兼容、未进核心依赖、价值低于云端 OCR。
+
+pytesseract>=0.3.10
+# Pillow 用于图片读取（Tesseract 需要 PIL.Image）
+Pillow>=10.0.0
+# PyMuPDF 用于 PDF 文字提取（route_ocr 的 local_pdf 引擎）
+PyMuPDF>=1.25.0

@@ -49,8 +49,8 @@ _PROVIDERS: Dict[str, Dict[str, Any]] = {
 }
 
 # 默认模型规格（未配置 env 时兜底）
-_DEFAULT_PRIMARY = 'stepfun:step-3.5-flash'
-_DEFAULT_FALLBACKS = 'stepfun:step-3.5-flash,siliconflow:deepseek-ai/DeepSeek-V4-Flash'
+_DEFAULT_PRIMARY = 'siliconflow:deepseek-ai/DeepSeek-V4-Flash'
+_DEFAULT_FALLBACKS = 'siliconflow:deepseek-ai/DeepSeek-V4-Flash,stepfun:step-3.5-flash'
 
 
 # ---------------------------------------------------------------------------

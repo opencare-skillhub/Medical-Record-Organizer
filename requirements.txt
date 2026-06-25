@@ -22,3 +22,6 @@ pytest>=7.4.0             # 测试框架
 
 # 可选：PDF 输出（V2 启用）
 # weasyprint>=60.0       # Markdown → PDF
+
+# ── 可选依赖见 requirements-ocr.txt（离线 OCR 兜底）──
+# 系统级二进制（tesseract + chi_sim）无法 pip 安装，详见 README「依赖」一节
