@@ -138,11 +138,15 @@ def run_pipeline(
     patient_id: str = 'P_report_mess',
     model: Optional[str] = None,
     skip_ocr: bool = False,
+    formats: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """执行 v2 MapReduce 流水线。
 
     支持原始图片/PDF 输入（自动 OCR 预处理 → extracted/*.md）；
     也支持直接 .md 输入。skip_ocr=True 跳过 OCR（仅处理 .md）。
+
+    formats: 输出格式列表，['html', 'md', 'docx', 'xlsx'] 的子集，
+             None（默认）表示生成所有格式。
     """
     input_path = Path(input_dir).resolve()  # C7: resolve 入参
     output_path = Path(output_dir)
@@ -220,7 +224,7 @@ def run_pipeline(
     )
 
     # Phase 6: 渲染报告
-    _render_reports(profile, groups, output_path)
+    _render_reports(profile, groups, output_path, formats=formats)
 
     logger.info(
         'v2 流水线完成: patient=%s files=%d groups=%s',
@@ -235,24 +239,46 @@ def _render_reports(
     profile: Dict[str, Any],
     groups: Dict[str, List[Dict[str, Any]]],
     output_path: Path,
+    formats: List[str] | None = None,
 ) -> None:
-    """生成 HTML（委托 render_html.py）+ Markdown 报告（委托 render_md.py）。"""
+    """生成 HTML / Markdown / DOCX / XLSX 报告。
+
+    formats: ['html', 'md', 'docx', 'xlsx'] 的子集，None 表示生成所有。
+    """
     from scripts.v2.render_html import render_html_report
     from scripts.render_md import render_md
 
-    # HTML 报告（核心输出）
-    html_path = render_html_report(profile, groups, output_path)
-    if html_path:
-        logger.info('HTML 报告已生成: %s', html_path)
-    else:
-        logger.warning('HTML 报告渲染失败（render_html_report 返回 None）')
+    if formats is None or 'html' in formats:
+        html_path = render_html_report(profile, groups, output_path)
+        if html_path:
+            logger.info('HTML 报告已生成: %s', html_path)
+        else:
+            logger.warning('HTML 报告渲染失败')
 
-    # Markdown 报告（委托 render_md.py，使用 case-report-template.md）
-    try:
-        md_path = render_md(profile, groups=groups, output_path=output_path / 'case_report.md')
-        logger.info('Markdown 报告已生成: %s', md_path)
-    except Exception as exc:
-        logger.warning('Markdown 报告渲染失败: %s', exc)
+    if formats is None or 'md' in formats:
+        try:
+            md_path = render_md(profile, groups=groups, output_path=output_path / 'case_report.md')
+            logger.info('Markdown 报告已生成: %s', md_path)
+        except Exception as exc:
+            logger.warning('Markdown 报告渲染失败: %s', exc)
+
+    if formats is None or 'docx' in formats:
+        try:
+            from scripts.v2.render_docx import render_docx_report
+            docx_path = render_docx_report(profile, groups, output_path)
+            if docx_path:
+                logger.info('DOCX 报告已生成: %s', docx_path)
+        except Exception as exc:
+            logger.warning('DOCX 报告渲染失败: %s', exc)
+
+    if formats is None or 'xlsx' in formats:
+        try:
+            from scripts.v2.render_xlsx import render_xlsx_report
+            xlsx_path = render_xlsx_report(profile, groups, output_path)
+            if xlsx_path:
+                logger.info('XLSX 报告已生成: %s', xlsx_path)
+        except Exception as exc:
+            logger.warning('XLSX 报告渲染失败: %s', exc)
 
 
 def _render_markdown(profile: Dict[str, Any], groups: Dict[str, List[Dict[str, Any]]], output_path: Path) -> None:
@@ -301,6 +327,15 @@ def _render_markdown(profile: Dict[str, Any], groups: Dict[str, List[Dict[str, A
     output_path.write_text('\n'.join(lines), encoding='utf-8')
 
 
+def _parse_format(format_arg: str) -> List[str]:
+    """把 --format 字符串解析为格式列表。"""
+    if format_arg == 'all':
+        return ['html', 'md', 'docx', 'xlsx']
+    # 别名映射
+    alias = {'doc': 'docx', 'xls': 'xlsx'}
+    return [alias.get(f, f) for f in format_arg.split(',')]
+
+
 # ---------------------------------------------------------------------------
 # CLI 入口
 # ---------------------------------------------------------------------------
@@ -314,7 +349,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument('--output-dir', required=True, help='输出目录')
     parser.add_argument('--patient-id', default='P_report_mess', help='患者ID')
     parser.add_argument('--model', help='LLM 模型名称')
-    parser.add_argument('--format', choices=['html', 'md', 'all'], default='all', help='输出格式')
+    parser.add_argument('--format', choices=['html', 'md', 'docx', 'xlsx', 'doc', 'xls', 'all'],
+                        default='all', help='输出格式（doc/xls 是 docx/xlsx 的别名）')
     parser.add_argument('--skip-ocr', action='store_true', help='跳过 OCR 预处理（仅处理 .md 文件）')
     parser.add_argument('--open', action='store_true', help='生成后自动打开 HTML')
     parser.add_argument('--log-level', default='INFO', help='日志级别')
@@ -341,6 +377,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             patient_id=args.patient_id,
             model=args.model,
             skip_ocr=args.skip_ocr,
+            formats=_parse_format(args.format),
         )
         
         print("\n" + "=" * 60)
