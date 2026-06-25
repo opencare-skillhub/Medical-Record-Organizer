@@ -20,9 +20,6 @@ temp*/
 # design / planning docs (keep out of versioned source)
 design/
 designs/
-docs/plans/
-docs/*.md
-!docs/patient-profile-schema-v1.md
 
 # root-level design/planning docs
 PRD.md
