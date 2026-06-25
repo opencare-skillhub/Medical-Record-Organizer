@@ -115,9 +115,36 @@ def _preprocess_raw_files(input_path: Path, output_path: Path, *, skip_ocr: bool
             (extract_dir / f"{raw_file.stem}.md").write_text('', encoding='utf-8')
         return extract_dir
 
-    from scripts.route_ocr import extract_text
+    from scripts.route_ocr import extract_text, extract_via_mineru_batch, route_ocr
 
+    # 第一步：路由所有文件，区分 mineru 和非 mineru
+    mineru_files: List[Path] = []
+    other_files: List[Path] = []
     for raw_file in raw_files:
+        try:
+            engine = route_ocr(raw_file)
+        except Exception:
+            engine = 'mineru'  # 默认走 mineru
+        if engine == 'mineru':
+            mineru_files.append(raw_file)
+        else:
+            other_files.append(raw_file)
+
+    # 第二步：批量处理 mineru 文件（一次 API 调用 ≤50 文件，解决逐文件串行慢的问题）
+    if mineru_files:
+        logger.info("MinerU 批量处理 %d 个文件...", len(mineru_files))
+        batch_results = extract_via_mineru_batch(
+            mineru_files,
+            extract_dir=extract_dir,
+        )
+        for raw_file in mineru_files:
+            md_path = extract_dir / f"{raw_file.stem}.md"
+            text = batch_results.get(raw_file, '')
+            md_path.write_text(text if text else '', encoding='utf-8')
+            logger.info("OCR 完成: %s -> %s (%d 字符)", raw_file.name, md_path.name, len(text or ''))
+
+    # 第三步：处理非 mineru 文件（逐文件，数量少且不需要 API）
+    for raw_file in other_files:
         logger.info("处理原始文件: %s", raw_file.name)
         md_path = extract_dir / f"{raw_file.stem}.md"
         try:

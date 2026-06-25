@@ -460,6 +460,239 @@ def extract_via_mineru(
         return '[MinerU失败-需人工确认]'
 
 
+def extract_via_mineru_batch(
+    files: List[Path],
+    *,
+    api_key: str = '',
+    api_url: str = '',
+    model_version: str = '',
+    extract_dir: Optional[Path] = None,
+) -> Dict[Path, str]:
+    """批量 MinerU 提取（一次申请 ≤50 文件，并行上传，统一轮询）。
+
+    适用场景：处理多个图片/PDF 文件时，改为批量 API 调用，
+    避免逐文件申请-上传-轮询-下载串行等待，大幅降低总耗时。
+
+    返回 {file_path: extracted_text} 字典（含缓存命中）。
+    """
+    key = _resolve_mineru_key(api_key)
+    base = _resolve_mineru_base(api_url)
+    mv = _resolve_mineru_model_version(model_version)
+
+    if not key:
+        logger.warning("MinerU batch 跳过（未配置 MINERU_API_KEY/MINERU_TOKEN）")
+        return {}
+
+    try:
+        import requests
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+    except ImportError as exc:
+        raise RuntimeError("requests 未安装") from exc
+
+    # Step 0: 过滤缓存命中和非 mineru 适用文件
+    results: Dict[Path, str] = {}
+    uncached: List[Path] = []
+    for fp in files:
+        cache_path = _cache_path(fp, extract_dir)
+        if cache_path.exists():
+            try:
+                cached = cache_path.read_text(encoding='utf-8')
+                if cached and not _is_fail_marker(cached):
+                    results[fp] = cached
+                    continue
+            except Exception:
+                pass
+        uncached.append(fp)
+
+    if not uncached:
+        return results
+
+    # 分组：html 文件需要 MinerU-HTML 模型，其他用默认
+    html_files = [f for f in uncached if f.suffix.lower() == '.html']
+    normal_files = [f for f in uncached if f.suffix.lower() != '.html']
+
+    batch_groups: List[Tuple[List[Path], str]] = []
+    for chunk in _chunk_list(normal_files, 50):
+        if chunk:
+            batch_groups.append((chunk, mv))
+    for chunk in _chunk_list(html_files, 50):
+        if chunk:
+            batch_groups.append((chunk, 'MinerU-HTML'))
+
+    if not batch_groups:
+        return results
+
+    # 逐批处理
+    for batch_files, batch_mv in batch_groups:
+        try:
+            batch_results = _process_mineru_batch(
+                batch_files, batch_mv, key, base, extract_dir,
+            )
+            results.update(batch_results)
+        except Exception as exc:
+            logger.warning("MinerU batch 失败 ({} 文件): {}", len(batch_files), exc)
+            for fp in batch_files:
+                results.setdefault(fp, '[MinerU失败-需人工确认]')
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 内部：单批 MinerU 处理
+# ---------------------------------------------------------------------------
+
+def _chunk_list(lst: List[Any], chunk_size: int) -> List[List[Any]]:
+    """将列表按 chunk_size 分块。"""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+
+def _process_mineru_batch(
+    files: List[Path],
+    model_version: str,
+    api_key: str,
+    base_url: str,
+    extract_dir: Optional[Path],
+) -> Dict[Path, str]:
+    """单批 MinerU 处理（≤50 文件）：apply → 并行上传 → 轮询 → 下载 → 缓存。"""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: Dict[Path, str] = {}
+    if not files:
+        return results
+
+    apply_url = f"{base_url}{_MINERU_APPLY_PATH}"
+
+    # 1. 申请批量上传链接
+    file_entries = [{"name": f.name, "data_id": _file_hash(f)[:32]} for f in files]
+    apply_resp = requests.post(
+        apply_url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "files": file_entries,
+            "model_version": model_version,
+            "enable_formula": True,
+            "enable_table": True,
+            "language": "ch",
+        },
+        timeout=30,
+    )
+    apply_resp.raise_for_status()
+    apply_data = apply_resp.json()
+    if apply_data.get("code") != 0:
+        raise RuntimeError(f"MinerU batch apply 失败：{apply_data.get('msg', '未知错误')}")
+
+    batch_id = apply_data.get("data", {}).get("batch_id")
+    upload_urls = apply_data.get("data", {}).get("file_urls", [])
+
+    if len(upload_urls) != len(files):
+        logger.warning("MinerU batch 上传链接数(%d) ≠ 文件数(%d)", len(upload_urls), len(files))
+
+    # 2. 并行上传所有文件
+    def _upload_one(idx_url: Tuple[int, str]) -> Tuple[int, bool, str]:
+        idx, url = idx_url
+        if idx >= len(files):
+            return idx, False, 'index out of range'
+        try:
+            with open(files[idx], 'rb') as fh:
+                upload_resp = requests.put(url, data=fh, timeout=120)
+                upload_resp.raise_for_status()
+            return idx, True, ''
+        except Exception as e:
+            return idx, False, str(e)
+
+    upload_map = list(enumerate(upload_urls))
+    upload_failures = []
+    with ThreadPoolExecutor(max_workers=min(8, len(upload_map))) as executor:
+        future_to_idx = {executor.submit(_upload_one, item): item[0] for item in upload_map}
+        for future in as_completed(future_to_idx):
+            idx, ok, err = future.result()
+            if not ok:
+                upload_failures.append((files[idx].name, err))
+                logger.warning("MinerU batch 上传失败 %s: %s", files[idx].name, err)
+
+    if upload_failures:
+        logger.warning("MinerU batch %d/%d 个文件上传失败", len(upload_failures), len(files))
+
+    # 3. 轮询结果
+    processed: set = set()  # 已处理的 file_name，避免重复下载
+    for attempt in range(60):  # 最多 2 分钟 (2s per poll)
+        poll_url = f"{base_url}{_MINERU_POLL_PATH_TMPL.format(batch_id=batch_id)}"
+        try:
+            poll_resp = requests.get(
+                poll_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=30,
+            )
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+        except Exception as e:
+            logger.warning("MinerU batch 轮询异常: %s", e)
+            time.sleep(2)
+            continue
+
+        if poll_data.get("code") != 0:
+            logger.warning("MinerU batch 轮询错误: %s", poll_data.get("msg"))
+            break
+
+        extract_results = poll_data.get("data", {}).get("extract_result", [])
+        if not extract_results:
+            time.sleep(2)
+            continue
+
+        all_done = True
+        name_to_path = {f.name: f for f in files}
+        for er in extract_results:
+            state = er.get("state", "")
+            file_name = er.get("file_name", "")
+            if file_name in processed:
+                continue
+            if state == "done":
+                zip_url = er.get("full_zip_url", "")
+                if zip_url:
+                    fp = name_to_path.get(file_name)
+                    if fp:
+                        try:
+                            zip_resp = requests.get(zip_url, timeout=120)
+                            zip_resp.raise_for_status()
+                            text = _mineru_extract_text_from_zip(zip_resp.content, fp.name)
+                            if not _is_fail_marker(text):
+                                cache_path = _cache_path(fp, extract_dir)
+                                cache_path.write_text(text, encoding='utf-8')
+                            results[fp] = text
+                        except Exception as e:
+                            logger.warning("MinerU batch 下载失败 %s: %s", file_name, e)
+                            results[fp] = '[MinerU提取失败-需人工确认]'
+                    processed.add(file_name)
+            elif state == "failed":
+                err_msg = er.get("err_msg", "")
+                logger.warning("MinerU batch 解析失败 %s: %s", file_name, err_msg)
+                fp = name_to_path.get(file_name)
+                if fp:
+                    results[fp] = '[MinerU提取失败-需人工确认]'
+                processed.add(file_name)
+            else:
+                # waiting-file / pending / running / converting
+                all_done = False
+
+        if all_done:
+            break
+        time.sleep(2)
+    else:
+        logger.warning("MinerU batch 轮询超时 batch_id=%s，已完成 %d/%d 文件",
+                       batch_id, len(results), len(files))
+
+    # 未完成标记
+    for fp in files:
+        if fp not in results:
+            results[fp] = '[MinerU提取失败-需人工确认]'
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
