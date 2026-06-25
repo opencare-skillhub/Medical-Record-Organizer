@@ -1,198 +1,183 @@
 # Patient Record Organizer
 
-智能病案整理助手：将零散的医疗资料（照片、PDF、Word、文本、录音）自动归类、结构化，生成标准化的病情档案。
+智能病案整理助手：将零散的医疗资料（照片、PDF、Word、文本）自动归类、结构化提取，生成标准化的 HTML/Markdown 病情档案。
+
+**核心链路**: 原始文件 → OCR (MinerU) → 脱敏 → LLM 结构化提取 → 聚合 → 报告渲染
+
+---
 
 ## 快速开始
 
+### 1. 安装依赖
+
 ```bash
-# 1. 安装核心依赖
+# pyproject.toml 方式（推荐）
+uv sync
+
+# 或 pip 方式
 pip install -r requirements.txt
+```
 
-# 1b.（可选）离线 OCR 兜底：pytesseract + Pillow
-#     仅当云端 MinerU + SiliconFlow DeepSeek-OCR 全部失败时才触发，主链路无需。
-#     pip install -r requirements-ocr.txt
-#     另需系统装 tesseract 二进制 + 中文语言包（pip 装不了）：
-#       macOS:        brew install tesseract tesseract-lang
-#       Debian/Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-chi-sim
+### 2. 配置 API Key
 
-# 2. 配置 API Key
+```bash
 cp .env.example .env
-# 编辑 .env，填入以下环境变量：
-# - OCR_API_KEY / OCR_BASE_URL / OCR_MODEL：SiliconFlow DeepSeek-OCR（模型 deepseek-ai/DeepSeek-OCR，base https://api.siliconflow.cn/v1）
-# - MINERU_API_KEY 或 MINERU_TOKEN：图片/扫描 PDF 深度解析（需配合 MINERU_API_URL=https://mineru.net）
-# - STEP_API_KEY：录音转写（如需 ASR）
-# - EDGEONE_PAGES_API_TOKEN：发布到 EdgeOne Pages（可选）
+```
 
-# 3. 依赖自检（xyb process 前会自动跑；也可单独跑）
-python3 xyb preflight
+必需配置的密钥：
 
-# 4. 运行测试
+| 服务 | 用途 | 环境变量 |
+|------|------|---------|
+| **MinerU** | 图片/扫描 PDF OCR（主链路） | `MINERU_API_KEY` / `MINERU_TOKEN` |
+| **SiliconFlow** | LLM 结构化提取（Map 阶段） | `OCR_API_KEY` / `OCR_BASE_URL` |
+| **StepFun** | LLM 备选（Map 阶段 fallback） | `STEP_API_KEY` |
+
+可选配置：
+
+- `OPENAI_API_KEY` — LLM 备选（openai 模型）
+- `STEP_API_KEY` — ASR 录音转写
+
+### 3. 运行测试
+
+```bash
 pytest tests/ -v
 ```
 
+---
+
 ## 使用方式
 
-### 命令行（xyb）
+### 命令行（一键处理）
 
 ```bash
-# 直接运行（开发模式）
-./xyb --help
-
-# 或通过 pip 安装后全局使用
-pip install -e .
-xyb --help
+# 处理一个目录下的病历资料
+./xyb process /path/to/病历/ --patient P001 --format all --open
 ```
 
-**常用命令**：
+参数说明：
+
+| 参数 | 说明 |
+|------|------|
+| `--patient` | 患者 ID（默认 P_report_mess） |
+| `--format` | 输出格式：`html` / `md` / `all` |
+| `--open` | 生成后自动打开 HTML |
+| `--skip-ocr` | 跳过 OCR（仅处理已有 .md） |
+| `--model` | 指定 LLM 模型，如 `stepfun:step-3.5-flash` |
+| `--force` | 忽略依赖缺失警告 |
+
+### 直接运行流水线
 
 ```bash
-# 收集资料
-./xyb ingest ~/Downloads/病历资料/
-
-# 初始化患者档案
-./xyb manifest --init --patient P001 --name '张三' --age 62
-
-# 一键处理（OCR/ASR + 分类 + 报告）
-./xyb process ~/Downloads/病历资料/ --patient P001 --format both
-
-# 查看版本历史
-./xyb history P001
-
-# 对比两个版本差异
-./xyb diff P001 v001 v002
-
-# 回滚到指定版本
-./xyb rollback P001 v001
-
-# OCR 提取
-./xyb ocr blood_test.jpg
-
-# 录音转写
-./xyb asr voice_memo.mp3
-
-# 文本分类
-./xyb classify extracted_text.txt
-
-# 生成报告
-./xyb render --patient P001 --format both
+python3 scripts/v2/pipeline_v2.py \
+  --input-dir /path/to/病历/ \
+  --output-dir /path/to/output/ \
+  --patient-id P001 \
+  --format all \
+  --open
 ```
 
-### 直接上传文件
+---
 
-将化验单照片、PDF、录音等直接发给 Agent，Agent 会自动：
-1. 扫描文件清单
-2. OCR/ASR 提取内容
-3. 自动分类（血常规 → 检验指标、CT → 影像检查...）
-4. 生成 Markdown + HTML 病例档案
+## 输出说明
 
-### 提供本地目录
+| 文件 | 说明 |
+|------|------|
+| `report.html` | HTML 报告（医生浏览用，1 分钟掌握病情） |
+| `case_report.md` | Markdown 报告（可打印/分享） |
+| `profile.json` | 聚合后的病情档案数据 |
+| `mdt_analysis.json` | MDT 多学科分析（问题建议） |
+| `mappings.json` | 脱敏映射表 |
 
-```
-"我的病历资料在 ~/Downloads/张三病历/"
-```
-
-Agent 会递归扫描目录下所有支持格式。
-
-### 上传 zip 压缩包
-
-直接上传包含混合文件的 zip，Agent 自动解压后处理。
-
-## 输出示例
+### 报告结构
 
 ```
-📋 分类结果：
-├── 检验指标 (8) ← 血常规×3、生化×2、肿瘤标志物×2、凝血×1
-├── 影像检查 (1) ← 胸部CT×1
-├── 病理报告 (1) ← 基因检测×1
-├── 用药方案 (2) ← 处方×2
-├── 诊疗记录 (1) ← 出院小结×1
-└── ⚠️ 待确认 (4)
-
-📅 诊疗时间线：
-  ─ 2024-03-15  首诊，肺腺癌确诊
-  ─ 2024-03-20  基因检测报告
-  ─ 2024-04-01  一线治疗开始
-
-✅ 病例档案已生成：
-   - output/case_report.md
-   - output/report.html
+第1页: 封面 + 病情速览（1分钟掌握）
+第2页: 诊疗时间线（核心）
+第3页: 检查指标趋势（肿瘤标志物、血常规、生化）
+第4页: 病理与基因
+第5页: 用药方案
+第6页: 影像检查
+第7页: 关注问题要点
+第8页: 问诊咨询建议
+第9页: 附件目录
 ```
+
+---
 
 ## 项目结构
 
 ```
 patient-record-organizer/
-├── xyb                      # CLI 入口（直接运行）
-├── scripts/
-│   ├── ingest.py          # 资料接入层（三种方式）
-│   ├── manifest.py        # 患者档案管理（SHA256 去重）
-│   ├── route_ocr.py       # 文档解析路由（PyMuPDF + MinerU + DS-OCR fallback）
-│   ├── classify.py        # 两层分类 + 日期提取
-│   ├── asr_stepfun.py     # ASR 引擎 C（SSE，StepAudio 2.5）
-│   ├── render_report.py   # 报告渲染器（MD + HTML + PDF + DOCX）
-│   └── desensitize.py     # 患者数据脱敏工具
-├── references/
-│   ├── case-report-template.md  # 病例档案 Jinja2 模板
-│   └── classification-rules.md  # 分类关键词词库
-├── tests/                 # 单元测试（156 passed）
-├── PRD.md                 # 产品需求文档
-├── SKILL.md               # Agent 工作流编排
-├── requirements.txt       # Python 依赖
-└── .env.example           # 环境变量配置示例
+├── xyb                         # CLI 入口
+├── pyproject.toml              # 项目配置与依赖管理
+├── requirements.txt            # pip 依赖（同步自 pyproject.toml）
+├── requirements-ocr.txt        # 可选离线 OCR 依赖
+├── .env.example                # 环境变量示例
+├── .gitignore
+│
+├── scripts/                    # 核心代码
+│   ├── v2/                    # v2 流水线（当前主链路）
+│   │   ├── pipeline_v2.py    # 端到端流水线编排
+│   │   ├── route_ocr.py      # OCR 路由（MinerU / PyMuPDF / SiliconFlow fallback）
+│   │   ├── desensitize.py    # 患者数据脱敏
+│   │   ├── map_extract.py    # LLM 结构化提取（Map 阶段）
+│   │   ├── reduce_merge.py   # 同类数据合并（Reduce 阶段）
+│   │   ├── shuffle_group.py  # 数据分组归类
+│   │   ├── render_html.py    # HTML 报告渲染
+│   │   └── llm_client.py     # LLM 调用封装（多 provider 支持）
+│   ├── mdt_analysis.py       # MDT 多学科分析
+│   ├── render_md.py          # Markdown 报告渲染
+│   ├── preflight.py          # 依赖自检
+│   └── ingest.py             # 资料接入
+│
+├── references/                # 模板与规则
+│   ├── html-report-template.html  # HTML 报告 Jinja2 模板
+│   ├── html-report-template-2.html
+│   ├── case-report-template.md    # Markdown 报告模板
+│   ├── classification-rules.md    # 分类关键词
+│   └── report-agent.md            # Agent 设计文档
+│
+├── doc/                        # 设计文档
+│   ├── AGENTS.md              # 报告生成 Agent 规范
+│   ├── fix-plan.md            # 优化/修复计划
+│   ├── workflow.md            # 工作流说明
+│   ├── mineru_batch_api.md    # MinerU 批量 API 文档
+│   ├── patient-profile-schema-v1.md  # 患者档案 Schema
+│   ├── data-contract.md       # 数据契约
+│   └── mdt-analysis-plan.md   # MDT 分析方案
+│
+└── tests/                      # 单元测试
+    ├── test_route_ocr.py
+    ├── test_cli.py
+    ├── test_preflight.py (stub)
+    └── v2/
+        ├── test_map_extract.py
+        └── test_pipeline_v2.py
 ```
 
-## 脚本调用示例
-
-```bash
-# 1. 资料收集
-./xyb ingest ~/Downloads/病历资料/
-
-# 2. manifest 初始化
-./xyb manifest --init --patient P001 --name '张三' --age 62
-
-# 3. OCR 提取
-./xyb ocr blood_test.jpg
-
-# 4. 录音转写（SSE 默认）
-./xyb asr voice_memo.mp3
-
-# 5. 分类
-./xyb classify extracted_text.txt
-
-# 6. 生成报告
-./xyb render --patient P001 --format both
-```
+---
 
 ## 核心特性
 
-- **零门槛接入**：直接上传文件，或提供目录路径，或上传 zip
-- **多格式支持**：照片、PDF、Word（DOCX）、文本、录音
-- **统一解析路由**：文字型 PDF 用 PyMuPDF 本地提取；扫描/复杂 PDF 与图片用 MinerU；DS-OCR 作为最终 fallback
-- **极速 ASR**：StepAudio 2.5 SSE，5 分钟音频 1 秒出，0.15 元/小时
-- **两层分类**：关键词规则（零成本）+ LLM 语义兜底
-- **增量更新**：SHA256 去重，跨会话持久化，分析结果自动缓存复用
-- **多格式输出**：Markdown + HTML + PDF + DOCX
-- **记忆系统**：版本快照、差异对比、一键回滚
-- **公网发布**：一键部署到 EdgeOne Pages（需配置 Token）
+- **零门槛接入**：直接上传文件或提供目录路径
+- **多格式支持**：照片、扫描件、文字 PDF、Word（DOCX）、文本
+- **统一解析路由**：图片/扫描 PDF → MinerU（首选），文字 PDF → PyMuPDF（本地），失败时 SiliconFlow DeepSeek-OCR 托底
+- **百万上下文 LLM**：全量发送无需截断，基因报告等大文档保持完整
+- **两级分类**：关键词规则（零成本）+ LLM 语义兜底
+- **自动脱敏**：姓名/电话/身份证/地址正则替换，映射本地保存可回填
+- **增量缓存**：SHA256 去重，OCR+LLM 结果自动缓存复用
+- **多格式输出**：HTML（交互式）+ Markdown（可打印）
 
-## 安全边界
+---
 
-- ❌ 不作诊断
-- ❌ 不给出治疗建议
-- ❌ 不替代医嘱和处方
+## 安全与隐私
+
+- ❌ 不作诊断，不出治疗建议，不替代医嘱
 - ✅ 只做"资料整理与结构化归档"
+- **自动脱敏**：姓名 → `[NAME_N]`，电话 → `[PHONE_N]`，身份证 → `[ID_N]`，含映射回填
+- **免责声明**：所有输出附带，不构成医学建议
 
-**🔒 隐私保护**：全部上传数据在送入云端 LLM 之前已完成**自动脱敏**（正则替换姓名/电话/身份证/地址等，保留所有医学术语）。脱敏映射写入 `mappings.json` 本地文件，可用于后续回填原始值。**任何人名上传后即被替换为 `[NAME_N]` 占位符**，不会泄露给云端 API。
-
-所有输出附带免责声明，不构成医学诊断或治疗建议。
-
-## API 成本估算
-
-日均处理 100 张图片 + 20 份 PDF + 几段录音：
-- OCR：~¥1-4/天
-- ASR：~¥0.15/小时
-- LLM（分类）：极低
-- **合计约 ¥2–6/天**
+---
 
 ## License
 

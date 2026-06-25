@@ -37,9 +37,16 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# virtual environment
+.venv/
+
+# build artifacts
+*.egg-info/
+dist/
+build/
+
+# uv
+uv.lock
+
 # system
 .DS_Store
-
-# uv build artifacts
-uv.lock
-*.egg-info/
