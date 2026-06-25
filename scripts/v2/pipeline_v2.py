@@ -131,10 +131,11 @@ def _preprocess_raw_files(input_path: Path, output_path: Path, *, skip_ocr: bool
             other_files.append(raw_file)
 
     # 第二步：智能选择 single vs batch mineru
-    #   - PDF 页数 >10 → batch 候选
-    #   - 总文件数 >5 且有 batch 候选 → 全部走 batch（一次批处理更简洁）
-    #   - 否则 → 全部走 single（少量小文件，single 更快更少开销）
+    #   - PDF 页数 >10 → batch（大文件值得统一轮询）
+    #   - 文件数 >50 → batch（分批并行上传，避免逐个轮询超时）
+    #   - 否则 → single（少量小文件，直接调更快，少开销，带重试）
     BIG_PDF_THRESHOLD = 10
+    BATCH_COUNT_THRESHOLD = 50
     try:
         import fitz  # PyMuPDF 判断 PDF 页数
     except ImportError:
@@ -151,7 +152,7 @@ def _preprocess_raw_files(input_path: Path, output_path: Path, *, skip_ocr: bool
             except Exception:
                 pass
 
-    use_batch = has_big_pdf or len(mineru_files) > 5
+    use_batch = has_big_pdf or len(mineru_files) > BATCH_COUNT_THRESHOLD
 
     if use_batch:
         batch_files = mineru_files
