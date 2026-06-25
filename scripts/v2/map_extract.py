@@ -590,7 +590,7 @@ def _typed_reextract(
     ]
     try:
         # 二阶段提取也需要足够 token，避免基因突变列表/检验指标被截断
-        result = call_llm_with_retry(messages, cfg['schema'], model=model, max_tokens=8000)
+        result = call_llm_with_retry(messages, cfg['schema'], model=model, max_tokens=16000)
         logger.info('二次 LLM 提取成功 type=%s: %s', report_type, filename)
         return result
     except Exception as exc:
@@ -626,8 +626,9 @@ def extract_single(
         {'role': 'system', 'content': SYSTEM_PROMPT},
         {'role': 'user', 'content': f'文件名：{filename}\n\n内容：\n{truncated_text}'},
     ]
-    # 复杂 schema 需要更多输出 token，从 2000 → 8000，避免 JSON 截断
-    result = call_llm_with_retry(messages, EXTRACT_SCHEMA, model=model, max_tokens=8000)
+    # 复杂 schema 需要更多输出 token，基因报告可能 42+ 条突变
+    # 仅主提取用 16000（模型支持百万上下文，输出端应给足空间）
+    result = call_llm_with_retry(messages, EXTRACT_SCHEMA, model=model, max_tokens=16000)
     result.setdefault('report_type', 'noise')
     result.setdefault('confidence', 0.0)
     result['_source_file'] = filename
