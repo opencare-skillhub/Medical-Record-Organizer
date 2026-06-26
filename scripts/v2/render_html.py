@@ -259,22 +259,18 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                      '阴性正常', '(-)', 'no mutation', 'not detected', '正常'}
     genetic_highlights: List[Dict[str, Any]] = []
 
-    # 1. 所有非良性突变（test_items: 包含致病、有丰度、有证据等级的）
-    # 同时从 pathology 和 clinical（如病情概述混合文档）两个组读取
-    _all_gene_items = list(groups.get('pathology') or []) + list(groups.get('clinical') or [])
+    # 1. 基因突变：仅从病理组(基因检测报告)中提取，必须有 entity_name
+    #    不混入 clinical 记录中的手工提取/文本提及
+    _all_gene_items = list(groups.get('pathology') or [])  # 仅病理组，不混 clinical
     _gene_seen = set()
     for item in _all_gene_items:
         for gene in (item.get('test_items') or []):
             if not isinstance(gene, dict):
                 continue
-            gene_name = gene.get('gene_name', '') or ''
+            gene_name = (gene.get('gene_name') or '').strip()
             result = gene.get('detection_result', '') or gene.get('result', '') or ''
-            # 兜底：从 result 文本中提取基因名（如"ATM突变-致癌原因"→ATM）
-            if not gene_name:
-                import re as _re
-                m = _re.match(r'([A-Z0-9]+)', result.strip())
-                if m:
-                    gene_name = m.group(1)
+
+            # 必须有基因名（排除手工提取的文本碎片如"ATM突变-致癌原因..."）
             if not gene_name:
                 continue
 
