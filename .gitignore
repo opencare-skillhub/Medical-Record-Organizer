@@ -10,6 +10,12 @@ patients/
 *.html
 *.pdf
 *.docx
+*.xlsx
+*.xls
+
+# OCR / pipeline cache
+.ocr_cache/
+__ocr_cache__/
 
 # temporary files (do not commit)
 temp_*/
