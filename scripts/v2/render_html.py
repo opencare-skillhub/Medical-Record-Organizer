@@ -808,7 +808,37 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                     timeline_items.append(t)
         timeline_items.sort(key=lambda x: x.get('date', '') or '')
 
-    # chart_svg_ca199（保留兼容）
+    # ---- ihc_note (IHC 临床解读) ----
+    ihc_note = None
+    for item in (groups.get('pathology') or []) + (groups.get('clinical') or []):
+        for field in ('conclusion', 'report_summary', 'clinical_summary'):
+            text = item.get(field, '') or ''
+            if '免疫组化' in text or '肠型' in text:
+                ihc_note = text[:300]
+                break
+        if ihc_note:
+            break
+    # 兜底：从 OCR 原文提取 IHC 临床解读
+    if not ihc_note:
+        import re as _re
+        for item in (groups.get('pathology') or []) + (groups.get('clinical') or []):
+            fname = item.get('_source_file', '')
+            src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+            if src.exists():
+                raw = src.read_text(encoding='utf-8')
+                m = _re.search(r'病理诊断[：:][^。\n]{10,200}?(?:免疫组化|肠型|IHC)[^。\n]{0,150}', raw)
+                if m:
+                    ihc_note = m.group(0).strip()[:300]
+                    break
+    # 兜底：从病理诊断字段提取
+    if not ihc_note:
+        for item in (groups.get('pathology') or []):
+            pd = item.get('pathology_diagnosis', '')
+            if isinstance(pd, str) and ('免疫组化' in pd or '肠型' in pd):
+                ihc_note = pd[:300]
+                break
+
+    # ---- chart_svg_ca199（保留兼容） ----
     chart_svg_ca199 = ''
     chart_svg = ''
     if 'CA199' in tumor_marker_tables:
@@ -1029,7 +1059,7 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         'pathology': pathology,
         'pathology_tag': None,
         'genetic_highlights': genetic_highlights,
-        'ihc_note': None,
+        'ihc_note': ihc_note,
         'medication_summary': medication_summary,
         'medication_table': medication_table,
         'medication_prescription_date': medication_prescription_date,
