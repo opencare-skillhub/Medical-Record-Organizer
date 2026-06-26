@@ -579,6 +579,18 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         })
     # 排序：有日期按日期，空日期排到最后
     imaging_summary.sort(key=lambda x: (x['date'] == '—', x['date'] or '9999'))
+    # 同日期合并(同一份报告被OCR拆成多页)
+    merged = []
+    for im in imaging_summary:
+        if merged and merged[-1]['date'] == im['date'] and im['date'] != '—':
+            merged[-1]['findings'] += '；' + im['findings']
+            if im.get('compare') and not merged[-1].get('compare'):
+                merged[-1]['compare'] = im['compare']
+            modality_parts = set(merged[-1]['modality'].split('-') + im.get('modality', '').split('-'))
+            merged[-1]['modality'] = '影像-' + '-'.join(sorted(m for m in modality_parts if m and m != '影像'))
+        else:
+            merged.append(im)
+    imaging_summary = merged
     # 从 imaging_narrative 补充
     img_narr = profile.get('imaging_narrative') or {}
     if img_narr.get('primary_lesion_timeline') and not imaging_summary:
