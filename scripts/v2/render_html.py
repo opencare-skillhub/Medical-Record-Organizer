@@ -253,13 +253,16 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                             break
 
     # ---- genetic_highlights ----
-    # 展示所有突变，按临床意义分级着色（致病/可能致病/VUS）
+    # 仅展示"致病性突变"基因，不包括VUS/良性
+    # 同时加入药物代谢基因（UGT1A1/DPYD等，来自pharmacogenomics）
     _PATHOGENIC_STRONG = {'致病', '移码', '缺失', '插入', '无义', 'stop', 'frameshift',
                           'deletion', 'nonsense', '截断', '错义', '扩增', '重排',
                           '失活', '功能丧失', 'pathogenic'}
     _BENIGN_WORDS = {'野生型', '野生', 'wild', '无突变', '阴性', '未检测到', '未检出',
-                     '阴性正常', '(-)', 'no mutation', 'not detected'}
+                     '阴性正常', '(-)', 'no mutation', 'not detected', '正常'}
     genetic_highlights: List[Dict[str, Any]] = []
+
+    # 1. 致病性突变基因（test_items）
     for item in (groups.get('pathology') or []):
         for gene in (item.get('test_items') or []):
             if not isinstance(gene, dict):
@@ -267,42 +270,69 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             result = gene.get('detection_result', '') or gene.get('result', '') or ''
             result_lower = result.lower()
 
-            # 跳过明确良性（野生型/未检出）
+            # 跳过良性/野生型/正常
             if any(w in result for w in _BENIGN_WORDS):
                 continue
 
             tier = (gene.get('evidence_tier') or '').strip().upper()
             is_path = gene.get('is_pathogenic')
 
-            # 分级：致病 / 可能致病 / VUS(意义未明)
-            if is_path is True or tier in ('1A', '1B', '2A', '2B') or any(w in result_lower for w in _PATHOGENIC_STRONG):
-                significance = 'pathogenic'
-                tier_label = {'1A': 'I类', '1B': 'I类', '2A': 'II类', '2B': 'II类', '3': 'III类'}.get(tier, '')
-            elif tier == '3' and '意义未明' not in result:
-                significance = 'vus'
-                tier_label = 'III类'
-            else:
-                significance = 'vus'
-                tier_label = tier or ''
+            # 仅保留致病性突变（非VUS）
+            if not (is_path is True or tier in ('1A', '1B', '2A', '2B')
+                    or any(w in result_lower for w in _PATHOGENIC_STRONG)):
+                continue
 
+            tier_label = {'1A': 'I类', '1B': 'I类', '2A': 'II类', '2B': 'II类', '3': 'III类'}.get(tier, '')
             genetic_highlights.append({
                 'category': 'gene',
                 'gene': gene.get('gene_name', ''),
                 'marker': gene.get('gene_name', ''),
                 'mutation': result,
                 'result': result,
-                'pathogenic': is_path,
-                'significance': significance,
-                'is_critical': significance == 'pathogenic',
+                'pathogenic': True,
+                'significance': 'pathogenic',
+                'is_critical': True,
                 'abundance': gene.get('abundance', ''),
                 'evidence_tier': tier,
                 'tier_label': tier_label,
                 'tags': [],
             })
 
-    # 按证据等级排序：1A→1B→2A→2B→3→无
-    _TIER_ORDER = {'1A': 1, '1B': 2, '2A': 3, '2B': 4, '3': 5}
-    genetic_highlights.sort(key=lambda x: _TIER_ORDER.get(x.get('evidence_tier', ''), 99))
+    # 2. 药物代谢/药敏基因（pharmacogenomics: UGT1A1, DPYD等）
+    _CHEMO_GENES = {'UGT1A1', 'DPYD', 'ERCC1', 'XRCC1', 'GSTP1', 'NQO1', 'MTHFR', 'CYP2D6', 'CYP3A4'}
+    pg_seen = set()
+    for item in (groups.get('pathology') or []):
+        for pg in (item.get('pharmacogenomics') or []):
+            if not isinstance(pg, dict):
+                continue
+            gene = pg.get('gene', '')
+            key = f"{gene}|{pg.get('genotype','')}"
+            if key in pg_seen:
+                continue
+            pg_seen.add(key)
+            # 只加入已知的化疗药物代谢基因
+            if gene.upper() in _CHEMO_GENES or any(g in gene.upper() for g in _CHEMO_GENES):
+                genotype = pg.get('genotype', '') or pg.get('variant', '')
+                risk = pg.get('risk', '') or pg.get('recommendation', '')
+                drug = pg.get('drug', '')
+                genetic_highlights.append({
+                    'category': 'pgx',  # pharmacogenomics 类别
+                    'gene': gene,
+                    'marker': gene,
+                    'mutation': genotype,
+                    'result': genotype,
+                    'pathogenic': False,
+                    'significance': 'drug',
+                    'is_critical': False,
+                    'abundance': '',
+                    'evidence_tier': '',
+                    'tier_label': drug or '药敏',
+                    'tags': [risk] if risk else [],
+                })
+
+    # 按致病优先级排序：致病突变 > 药敏基因
+    _SIG_ORDER = {'pathogenic': 0, 'drug': 1}
+    genetic_highlights.sort(key=lambda x: _SIG_ORDER.get(x.get('significance', ''), 99))
 
     # ---- genetic_highlights 兜底：LLM 返回空时用 parse_genetics 从原文提取 ----
     if not genetic_highlights and (groups.get('pathology') or []):
