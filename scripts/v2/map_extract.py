@@ -544,11 +544,13 @@ _TYPE_EXTRACT_PROMPTS = {
         'schema': {
             'type': 'object',
             'properties': {
+                'document_date': {'type': 'string', 'description': '报告日期 YYYY-MM-DD，必须提取'},
                 'findings': {'type': 'array', 'items': {'type': 'string'}},
                 'conclusion': {'type': 'string'},
+                'modality': {'type': 'string', 'description': '检查方式: CT/MRI/超声/PET-CT/X线'},
             },
         },
-        'prompt': '你是影像报告提取器。提取影像所见(findings)和诊断意见(conclusion)。输出 JSON。',
+        'prompt': '你是影像报告提取器。提取影像所见(findings)、诊断意见(conclusion)、报告日期(document_date，格式YYYY-MM-DD，必须从文本中提取不可留空)、检查方式(modality)。输出 JSON。',
     },
     'medication': {
         'schema': {

@@ -29,32 +29,49 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _TEMPLATE_PATH = _PROJECT_ROOT / 'references' / 'html-report-template.html'
 
 # 肿瘤标志物中文名 → 标准缩写
+# 注意：LLM 有时输出"糖链抗原"（医院写法差异），统一归一化
 _MARKER_ALIASES = {
-    '癌胚抗原': 'CEA',
-    '糖类抗原19-9': 'CA199', '糖类抗原19-9(高值)': 'CA199', 'ca199': 'CA199', 'ca19-9': 'CA199',
-    '糖类抗原125': 'CA125', 'ca125': 'CA125',
-    '糖类抗原15-3': 'CA153', '糖类抗原153': 'CA153', 'ca15-3': 'CA153', 'ca153': 'CA153',
-    '糖类抗原724': 'CA724', '糖类抗原72-4': 'CA724', 'ca724': 'CA724', 'ca72-4': 'CA724',
+    '癌胚抗原': 'CEA', 'cea': 'CEA',
+    '糖类抗原19-9': 'CA199', '糖链抗原19-9': 'CA199',
+    '糖类抗原19-9(高值)': 'CA199', '糖链抗原19-9(高值)': 'CA199',
+    'ca199': 'CA199', 'ca19-9': 'CA199',
+    '糖类抗原125': 'CA125', '糖链抗原125': 'CA125', 'ca125': 'CA125',
+    '糖类抗原15-3': 'CA153', '糖链抗原15-3': 'CA153',
+    '糖类抗原153': 'CA153', '糖链抗原153': 'CA153',
+    'ca15-3': 'CA153', 'ca153': 'CA153',
+    '糖类抗原724': 'CA724', '糖类抗原72-4': 'CA724',
+    '糖链抗原724': 'CA724', '糖链抗原72-4': 'CA724',
+    'ca724': 'CA724', 'ca72-4': 'CA724',
     '甲胎蛋白': 'AFP', 'afp': 'AFP',
     '前列腺特异性抗原': 'PSA', 'psa': 'PSA',
-    '糖类抗原242': 'CA242', 'ca242': 'CA242',
-    '糖类抗原50': 'CA50', 'ca50': 'CA50',
+    '糖类抗原242': 'CA242', '糖链抗原242': 'CA242', 'ca242': 'CA242',
+    '糖类抗原50': 'CA50', '糖链抗原50': 'CA50', 'ca50': 'CA50',
 }
+
+
+def _normalize_marker_text(name: str) -> str:
+    """把医院常见写法差异（糖链→糖类，空格→无）归一化。"""
+    if not name:
+        return ''
+    s = name.strip()
+    if s.startswith('糖链'):
+        s = '糖类' + s[2:]
+    return s.lower()
 
 
 def _standard_marker_name(name: str) -> str:
     """把中文标志物名映射为标准缩写。"""
     if not name:
         return ''
-    lower = name.strip()
-    if lower in _MARKER_ALIASES:
-        return _MARKER_ALIASES[lower]
+    name = _normalize_marker_text(name)
+    if name in _MARKER_ALIASES:
+        return _MARKER_ALIASES[name]
     for cn, std in _MARKER_ALIASES.items():
-        if cn in lower:
+        if cn in name:
             return std
     # 英文缩写直接保留大写
-    if lower.isascii():
-        return lower.upper()
+    if name.isascii():
+        return name.upper()
     return name
 
 
@@ -155,6 +172,16 @@ def compute_report_context(
         })
     timeline.sort(key=lambda x: x['dates'][0] if x['dates'] else '')
 
+    # 去重：相同日期+类别+前80字摘要的去重
+    seen = set()
+    deduped = []
+    for t in timeline:
+        key = (t['dates'][0] if t['dates'] else '', t['category'], t['note'][:80])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(t)
+    timeline = deduped
+
     # ---- pathology ----
     pathology: List[Dict[str, Any]] = []
     for item in (groups.get('pathology') or []):
@@ -176,18 +203,42 @@ def compute_report_context(
         })
 
     # ---- genetic_highlights ----
+    # 仅保留有临床意义的突变：致病性明确 或 证据等级≥III类
+    # 排除野生型/良性变异/意义未明，不展示"突变"字样弱信号
+    _PATHOGENIC_WORDS = {'致病', '移码', '缺失', '插入', '无义', 'stop', 'frameshift',
+                         'deletion', 'nonsense', '截断', '错义', '扩增', '重排',
+                         '失活', '功能丧失', '扩增', 'pathogenic', '突变'}
+    _BENIGN_WORDS = {'野生型', '野生', 'wild', '无突变', '阴性', '未检测到', '未检出',
+                     '阴性正常', '(-)', '无意义', 'not detected'}
     genetic_highlights: List[Dict[str, Any]] = []
     for item in (groups.get('pathology') or []):
         for gene in (item.get('test_items') or []):
             if not isinstance(gene, dict):
                 continue
             result = gene.get('detection_result', '') or gene.get('result', '') or ''
+            result_lower = result.lower()
             pathogenic = gene.get('is_pathogenic')
-            if pathogenic is None:
-                pathogenic = any(k in result for k in ['致病', 'pathogenic', '突变'])
-            tags = []
-            if gene.get('clinical_significance'):
-                tags.append(gene['clinical_significance'])
+            tier = (gene.get('evidence_tier') or '').strip().upper()
+
+            # 跳过明确良性的
+            if any(w in result for w in _BENIGN_WORDS):
+                continue
+            # 跳过只有"突变"字眼但无强致病信号的弱匹配（如"同义突变""SNP""变异"等）
+            if not pathogenic and tier not in ('1A', '1B', '2A', '2B', '3'):
+                pathogenic = any(w in result_lower for w in _PATHOGENIC_WORDS)
+                if not pathogenic:
+                    continue  # 无致病信号 → 不展示
+
+            tier_label = ''
+            if tier in ('1A', '1B'):
+                tier_label = 'I类'
+            elif tier in ('2A', '2B'):
+                tier_label = 'II类'
+            elif tier == '3':
+                tier_label = 'III类'
+            elif tier:
+                tier_label = tier
+
             genetic_highlights.append({
                 'category': 'gene',
                 'gene': gene.get('gene_name', ''),
@@ -196,26 +247,61 @@ def compute_report_context(
                 'result': result,
                 'pathogenic': pathogenic,
                 'is_critical': pathogenic or False,
-                'tags': tags,
+                'abundance': gene.get('abundance', ''),
+                'evidence_tier': tier,
+                'tier_label': tier_label,
+                'tags': [],
             })
 
     # ---- medication ----
     medication_summary: List[Dict[str, Any]] = []
     medication_table: List[Dict[str, Any]] = []
     med_tl = profile.get('medication_timeline') or {}
+    seen_meds: set = set()
+
+    def _add_med(name: str, dose: str, route: str = '', purpose: str = '') -> None:
+        if not name:
+            return
+        key = (name.strip().lower(), str(dose).strip())
+        if key in seen_meds:
+            return
+        seen_meds.add(key)
+        medication_summary.append({'label': name, 'value': dose, 'is_critical': False})
+        medication_table.append({'name': name, 'dose': dose, 'route': route, 'purpose': purpose})
+
+    # 主来源：medication_timeline（reduce_medication_history 的输出）
     for med in (med_tl.get('timeline') or []):
-        name = med.get('name', '') or med.get('drug', '')
-        medication_summary.append({
-            'label': name,
-            'value': med.get('dosage') or med.get('dose', '') or '',
-            'is_critical': False,
-        })
-        medication_table.append({
-            'name': name,
-            'dose': med.get('dosage') or med.get('dose', ''),
-            'route': med.get('route', ''),
-            'purpose': med.get('purpose', '') or med.get('type', ''),
-        })
+        _add_med(
+            med.get('name', '') or med.get('drug', ''),
+            med.get('dosage') or med.get('dose', '') or '',
+            med.get('route', ''),
+            med.get('purpose', '') or med.get('type', ''),
+        )
+
+    # 补充来源：clinical 记录中的 medications（门诊/出院小结里的用药方案）
+    for item in (groups.get('clinical') or []):
+        for m in (item.get('medications') or []):
+            if isinstance(m, dict):
+                _add_med(
+                    m.get('name', '') or m.get('drug', ''),
+                    m.get('dosage') or m.get('dose', '') or '',
+                    m.get('route', ''),
+                    m.get('purpose', '') or m.get('type', ''),
+                )
+            elif isinstance(m, str):
+                _add_med(m, '')
+
+    # 补充来源：medication 组中的 medications
+    for item in (groups.get('medication') or []):
+        for m in (item.get('medications') or []):
+            if isinstance(m, dict):
+                _add_med(
+                    m.get('name', '') or m.get('drug', ''),
+                    m.get('dosage') or m.get('dose', '') or '',
+                    m.get('route', ''),
+                    m.get('purpose', '') or m.get('type', ''),
+                )
+
     medication_prescription_date = ''
     if med_tl.get('timeline'):
         medication_prescription_date = med_tl['timeline'][0].get('start_date', '') or ''
@@ -360,14 +446,178 @@ def compute_report_context(
         if img_narr.get('data_limitation'):
             key_concerns.append(img_narr['data_limitation'])
 
+    # ---- 通用检验指标表（非肿瘤标志物 + 单日期场景兜底） ----
+    lab_flat: List[Dict[str, Any]] = []
+    for indicator, data in lab_trends.items():
+        if _is_tumor_marker(indicator):
+            continue  # 肿瘤标志物已在 tumor_marker_tables 里
+        trend = data.get('trend', [])
+        if trend:
+            # 取最新一条（trend 已按日期升序排列，取最后一个）
+            tr = trend[-1]
+            lab_flat.append({
+                'name': indicator,
+                'value': tr.get('value', ''),
+                'unit': tr.get('unit', ''),
+                'date': tr.get('date', ''),
+                'abnormal': bool(tr.get('abnormal')),
+            })
+
+    # ---- 检验分区与异常卡片 ----
+    _LAB_CATEGORIES = {
+        '肿瘤标志物': {'CEA','CA199','CA125','CA724','CA242','CA50','CA153','AFP','PSA','糖类抗原','糖链抗原','癌胚抗原'},
+        '肝功能': {'ALT','AST','GGT','ALP','TBIL','DBIL','IBIL','TP','ALB','GLB','A/G','前白蛋白','甘胆酸','LDH','总胆红素','直接胆红素','白蛋白','转氨酶'},
+        '肾功能': {'CREA','BUN','UREA','UA','eGFR','肌酐','尿素','尿酸','肾小球'},
+        '血常规': {'WBC','RBC','Hb','HCT','PLT','NEU','LYM','MONO','EO','BASO','白细胞','红细胞','血红蛋白','血小板','中性粒','淋巴'},
+        '电解质': {'K','Na','Cl','Ca','P','Mg','钾','钠','氯','钙','磷','镁','碳酸氢根'},
+        '血脂血糖': {'TG','TC','HDL','LDL','GLU','血糖','甘油三酯','总胆固醇','脂蛋白','sd-LDL'},
+        '凝血功能': {'PT','APTT','INR','D-二聚体','纤维蛋白原','FIB','TT'},
+        '其他': set(),
+    }
+
+    def _classify_lab(name: str) -> str:
+        upper = name.upper()
+        for cat, keywords in _LAB_CATEGORIES.items():
+            for kw in keywords:
+                if kw in upper or kw in name:
+                    return cat
+        return '其他'
+
+    # 指标分类
+    categorized: Dict[str, List[Dict[str, Any]]] = {}
+    for indicator, data in lab_trends.items():
+        cat = _classify_lab(indicator)
+        categorized.setdefault(cat, [])
+        for tr in data.get('trend', []):
+            categorized[cat].append({
+                'name': indicator, 'value': tr.get('value',''), 'unit': tr.get('unit',''),
+                'date': tr.get('date',''), 'abnormal': bool(tr.get('abnormal', False)),
+                'flag': tr.get('flag',''), 'ref_low': data.get('ref_range',(None,None))[0] if isinstance(data.get('ref_range'), (tuple, list)) else None,
+                'ref_high': data.get('ref_range',(None,None))[1] if isinstance(data.get('ref_range'), (tuple, list)) else None,
+            })
+            break
+    # 去掉空分类
+    categorized = {k: v for k, v in categorized.items() if v and k != '其他'}
+    # 异常指标抢眼展示（卡片格式）
+    lab_abnormal: List[Dict[str, Any]] = []
+    for items in categorized.values():
+        for it in items:
+            if it['abnormal']:
+                lab_abnormal.append(it)
+    categorized_lab = [{'category': k, 'items': v} for k, v in categorized.items()]
+
+    # ---- lab_analysis_conclusion (检验分析结论) ----
+    lab_analysis_conclusion = ''
+    for item in (groups.get('lab') or []):
+        if item.get('lab_analysis_conclusion'):
+            lab_analysis_conclusion = item['lab_analysis_conclusion']
+            break
+
+    # ---- clinical_summary (临床摘要) ----
+    clinical_summary = ''
+    for item in (groups.get('clinical') or []):
+        if item.get('clinical_summary'):
+            clinical_summary = item['clinical_summary']
+            break
+
+    # ---- pathology_diagnosis (病理诊断要点) ----
+    pathology_diagnosis: Optional[Dict[str, Any]] = None
+    for item in (groups.get('pathology') or []):
+        pd = item.get('pathology_diagnosis')
+        if pd:
+            # LLM 有时返回 list/str 而非 dict
+            if isinstance(pd, list):
+                for e in pd:
+                    if isinstance(e, dict):
+                        pd = e
+                        break
+                else:
+                    logger.warning('pathology_diagnosis 为 list 且无 dict 元素，跳过')
+                    continue
+            if isinstance(pd, str):
+                # 字符串格式 "胰腺穿刺标本，查见肿瘤，建议免疫组化协助分析"
+                logger.info('pathology_diagnosis 为 str，转换为 dict: %s', pd[:80])
+                pd_dict: Dict[str, Any] = {'pathology_diagnosis': pd}
+                # 尝试从原文中提取更多字段
+                raw_text = ' '.join([d.get('summary', '') or '' for d in (item.get('findings') or [])])
+                if 'T' in raw_text.upper() and 'N' in raw_text.upper() and 'M' in raw_text.upper():
+                    import re
+                    tnm = re.search(r'(T\d[ab]?N\d[ab]?M\d[ab]?)', raw_text)
+                    if tnm:
+                        pd_dict['tnm_stage'] = tnm.group(1)
+                pd = pd_dict
+            if isinstance(pd, dict):
+                pathology_diagnosis = pd
+                break
+            logger.warning('pathology_diagnosis 非 dict/str/list (type=%s)，跳过', type(pd).__name__)
+
+    # ---- ihc_markers (免疫组化) ----
+    ihc_items: List[Dict[str, Any]] = []
+    for item in (groups.get('pathology') or []):
+        for m in (item.get('ihc_markers') or []):
+            if isinstance(m, dict):
+                ihc_items.append(m)
+    # 兜底：LLM 未提取免疫组化时，从 sanitized 原文正则提取常见标记物
+    if not ihc_items and (groups.get('pathology') or []):
+        import re
+        _IHC_PATTERN = re.compile(
+            r'(CK\d+|CD\d+|CDX2|SATB2|P40|P53|TTF-?1|Napsin\s*A|NapsinA|'
+            r'Ki-?67|SMAD4|Her-?2|HER-?2|ER|PR|AR|Vimentin|VIM|EMA|'
+            r'CgA|Syn|SMA|Desmin|MSH2|MSH6|MLH1|PMS2|S100|MUC\d*|'
+            r'PD-?L1|PD-L1|CK7|CK19|CK20|CA19-9|GATA3|PAX8|'
+            r'CD3|CD4|CD8|CD20|CD68|CD163|FoxP3)\s*[\(（]?\s*[-+±%0-9.]+\s*[)）]?',
+            re.IGNORECASE
+        )
+        for item in (groups.get('pathology') or []):
+            fname = item.get('_source_file', '')
+            src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+            if src.exists():
+                raw = src.read_text(encoding='utf-8')
+                for m in _IHC_PATTERN.finditer(raw):
+                    ihc_items.append({
+                        'marker': m.group(1),
+                        'result': m.group(0)[len(m.group(1)):].strip(),
+                    })
+
+    # ---- pd_l1 ----
+    pd_l1: Optional[Dict[str, Any]] = None
+    for item in (groups.get('pathology') or []):
+        pl = item.get('pd_l1')
+        if pl:
+            if not isinstance(pl, dict):
+                logger.warning('pd_l1 非 dict (type=%s)，跳过: %s', type(pl).__name__, str(pl)[:100])
+                continue
+            pd_l1 = pl
+            break
+
+    # ---- timeline_items (临床时间轴) ----
+    timeline_items: List[Dict[str, Any]] = []
+    for item in (groups.get('clinical') or []):
+        for t in (item.get('timeline_items') or []):
+            if isinstance(t, dict):
+                timeline_items.append(t)
+
     # ---- consultation_questions ----
-    consultation_questions: List[str] = [
-        '建议补充历次肿瘤标志物结果以完善趋势分析',
-        '建议补充用药方案详细信息（药物、剂量、周期）',
-        '建议补充病理报告（组织学类型、免疫组化）',
-    ]
-    if not imaging_summary:
-        consultation_questions.insert(0, '建议补充影像检查报告')
+    # 从 MDT 分析中获取 LLM 生成的咨询建议，失败时根据数据缺口动态生成
+    mdt_analysis = profile.get('mdt_analysis') or {}
+    consultation_questions = mdt_analysis.get('consultation_questions') or []
+    if not consultation_questions:
+        questions = []
+        if not imaging_summary:
+            questions.append('建议补充历次影像检查报告（CT/MRI/PET-CT），以对照评估病灶变化')
+        if not tumor_marker_tables:
+            questions.append('建议补充历次肿瘤标志物结果以完善趋势分析')
+        if not medication_table:
+            questions.append('建议补充用药方案详细信息（药物、剂量、周期、疗效评估）')
+        if not pathology_diagnosis:
+            questions.append('建议补充病理报告（组织学类型、TNM分期、免疫组化、基因检测结果）')
+        else:
+            if not ihc_items:
+                questions.append('建议补充免疫组化结果（MSI/MMR状态、HER2、PD-L1等）')
+        if questions:
+            consultation_questions = questions
+        else:
+            consultation_questions = ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
 
     # ---- files ----
     files: List[Dict[str, Any]] = []
@@ -412,6 +662,9 @@ def compute_report_context(
         'imaging_summary': imaging_summary,
         'tumor_marker_tables': tumor_marker_tables,
         'lab_trend': lab_trend_rows,
+        'lab_flat': lab_flat,
+        'lab_abnormal': lab_abnormal,
+        'categorized_lab': categorized_lab,
         'chart_svg_ca199': chart_svg_ca199,
         'chart_svg': chart_svg,
         'chart_svg_normalized': chart_svg_normalized,
@@ -423,6 +676,14 @@ def compute_report_context(
         'gaps': gaps,
         'updated_at': profile.get('generated_at', ''),
         'report_title': report_title,
+        'lab_analysis_conclusion': lab_analysis_conclusion,
+        'clinical_summary': clinical_summary,
+        'pathology_diagnosis': pathology_diagnosis,
+        'ihc_items': ihc_items,
+        'pd_l1': pd_l1,
+        'timeline_items': timeline_items,
+        'pancreatic_consensus_link': 'https://mp.weixin.qq.com/s/Vpn2oH9cDgsOPg5oekvwCg',
+        'pancreatic_consensus_text': '胰腺癌精准检测与分子诊断中国专家共识（2025版）',
     }
     return ctx
 

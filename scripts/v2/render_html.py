@@ -235,13 +235,12 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                             break
 
     # ---- genetic_highlights ----
-    # 仅保留有临床意义的突变：致病性明确 或 证据等级≥III类
-    # 排除野生型/良性变异/意义未明，不展示"突变"字样弱信号
-    _PATHOGENIC_WORDS = {'致病', '移码', '缺失', '插入', '无义', 'stop', 'frameshift',
-                         'deletion', 'nonsense', '截断', '错义', '扩增', '重排',
-                         '失活', '功能丧失', '扩增', 'pathogenic', '突变'}
+    # 展示所有突变，按临床意义分级着色（致病/可能致病/VUS）
+    _PATHOGENIC_STRONG = {'致病', '移码', '缺失', '插入', '无义', 'stop', 'frameshift',
+                          'deletion', 'nonsense', '截断', '错义', '扩增', '重排',
+                          '失活', '功能丧失', 'pathogenic'}
     _BENIGN_WORDS = {'野生型', '野生', 'wild', '无突变', '阴性', '未检测到', '未检出',
-                     '阴性正常', '(-)', '无意义', 'not detected'}
+                     '阴性正常', '(-)', 'no mutation', 'not detected'}
     genetic_highlights: List[Dict[str, Any]] = []
     for item in (groups.get('pathology') or []):
         for gene in (item.get('test_items') or []):
@@ -249,27 +248,24 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 continue
             result = gene.get('detection_result', '') or gene.get('result', '') or ''
             result_lower = result.lower()
-            pathogenic = gene.get('is_pathogenic')
-            tier = (gene.get('evidence_tier') or '').strip().upper()
 
-            # 跳过明确良性的
+            # 跳过明确良性（野生型/未检出）
             if any(w in result for w in _BENIGN_WORDS):
                 continue
-            # 跳过只有"突变"字眼但无强致病信号的弱匹配（如"同义突变""SNP""变异"等）
-            if not pathogenic and tier not in ('1A', '1B', '2A', '2B', '3'):
-                pathogenic = any(w in result_lower for w in _PATHOGENIC_WORDS)
-                if not pathogenic:
-                    continue  # 无致病信号 → 不展示
 
-            tier_label = ''
-            if tier in ('1A', '1B'):
-                tier_label = 'I类'
-            elif tier in ('2A', '2B'):
-                tier_label = 'II类'
-            elif tier == '3':
+            tier = (gene.get('evidence_tier') or '').strip().upper()
+            is_path = gene.get('is_pathogenic')
+
+            # 分级：致病 / 可能致病 / VUS(意义未明)
+            if is_path is True or tier in ('1A', '1B', '2A', '2B') or any(w in result_lower for w in _PATHOGENIC_STRONG):
+                significance = 'pathogenic'
+                tier_label = {'1A': 'I类', '1B': 'I类', '2A': 'II类', '2B': 'II类', '3': 'III类'}.get(tier, '')
+            elif tier == '3' and '意义未明' not in result:
+                significance = 'vus'
                 tier_label = 'III类'
-            elif tier:
-                tier_label = tier
+            else:
+                significance = 'vus'
+                tier_label = tier or ''
 
             genetic_highlights.append({
                 'category': 'gene',
@@ -277,8 +273,9 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 'marker': gene.get('gene_name', ''),
                 'mutation': result,
                 'result': result,
-                'pathogenic': pathogenic,
-                'is_critical': pathogenic or False,
+                'pathogenic': is_path,
+                'significance': significance,
+                'is_critical': significance == 'pathogenic',
                 'abundance': gene.get('abundance', ''),
                 'evidence_tier': tier,
                 'tier_label': tier_label,
@@ -369,6 +366,18 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
     # ---- imaging_summary ----
     imaging_summary: List[Dict[str, Any]] = []
     for item in (groups.get('imaging') or []):
+        date = item.get('document_date') or item.get('report_date') or ''
+        if not date:
+            # 从原始文件名推断日期（脱敏映射中保留了原始文件名的日期信息）
+            fname = item.get('_source_file', '')
+            import re
+            m = re.search(r'(\d{4}-\d{2}-\d{2})', fname)
+            if not m:
+                m = re.search(r'(\d{4})\D?(\d{2})\D?(\d{2})', fname)
+            if m:
+                date = f'{m.group(1)}-{m.group(2)}-{m.group(3)}' if m.lastindex and m.lastindex >= 3 else m.group(1)
+        if not date:
+            date = '—'
         findings = item.get('findings')
         if isinstance(findings, list):
             findings_text = '；'.join(str(f) for f in findings if f)
@@ -377,7 +386,7 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         else:
             findings_text = item.get('conclusion', '') or ''
         imaging_summary.append({
-            'date': item.get('document_date') or item.get('report_date') or '日期待确认',
+            'date': date,
             'modality': item.get('modality', '') or _infer_modality(item.get('_source_file', '')),
             'findings': findings_text,
         })
@@ -558,15 +567,25 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         for m in (item.get('ihc_markers') or []):
             if isinstance(m, dict):
                 ihc_items.append(m)
-    # 兜底：LLM 未提取免疫组化时，从 sanitized 原文正则提取常见标记物
+    # 兜底：LLM 未提取免疫组化时，从 sanitized 原文正则提取
     if not ihc_items and (groups.get('pathology') or []):
         import re
         _IHC_PATTERN = re.compile(
-            r'(CK\d+|CD\d+|CDX2|SATB2|P40|P53|TTF-?1|Napsin\s*A|NapsinA|'
-            r'Ki-?67|SMAD4|Her-?2|HER-?2|ER|PR|AR|Vimentin|VIM|EMA|'
+            r'(CK\d*|CD\d+|CDX2|SATB2|P40|P53|TTF-?1|Napsin\s*A|NapsinA|'
+            r'Ki-?67(?:\([^)]+\))?|SMAD4|Her-?2|HER-?2|ER|PR|AR|Vimentin|VIM|EMA|'
             r'CgA|Syn|SMA|Desmin|MSH2|MSH6|MLH1|PMS2|S100|MUC\d*|'
-            r'PD-?L1|PD-L1|CK7|CK19|CK20|CA19-9|GATA3|PAX8|'
-            r'CD3|CD4|CD8|CD20|CD68|CD163|FoxP3)\s*[\(（]?\s*[-+±%0-9.]+\s*[)）]?',
+            r'PD-?L1|CK7|CK19|CK20|CA19-9|GATA3|PAX8|CD3|CD4|CD8|CD20|CD68|CD163|FoxP3|'
+            r'CAM5\.2|CA125|BCL2|BCL6|MUM1|c-?MYC|ALK|ROS1|BRAF|MUC4|'
+            r'MUC5AC|CEA|E-?cadherin|EMA|CKAE1/AE3|CK8/18|DOG1|'
+            r'CD34|CD31|CD117|CD56|CD138|CD38|CD5|CD10|CD30|'
+            r'CD79a|PAX5|TdT|MPO|CD15|CD99|SOX-?10|SOX10|'
+            r'HMB-?45|Melan-?A|SMA|SMMS-1|Calretinin|Caldesmon)'
+            r'\s*[\(（]?[\s]*[-+±%0-9.]+[\s]*[\)）]?',
+            re.IGNORECASE
+        )
+        _IHC_LINE = re.compile(
+            r'(CK\d*|CD\d+|CDX2|Ki-?67|PD-?L1|CK7|CK19|P53|P40|TTF-?1|'
+            r'HER-?2|ER|PR|SMA|Desmin|CgA|Syn)\s*[：:(（]\s*([-+±%0-9a-zA-Z]+)\s*[)）]',
             re.IGNORECASE
         )
         for item in (groups.get('pathology') or []):
@@ -574,11 +593,19 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
             if src.exists():
                 raw = src.read_text(encoding='utf-8')
-                for m in _IHC_PATTERN.finditer(raw):
+                for m in _IHC_LINE.finditer(raw):
                     ihc_items.append({
-                        'marker': m.group(1),
-                        'result': m.group(0)[len(m.group(1)):].strip(),
+                        'marker': m.group(1).strip(),
+                        'result': m.group(2).strip(),
                     })
+                for m in _IHC_PATTERN.finditer(raw):
+                    name = m.group(1).strip()
+                    existing = set(i['marker'] for i in ihc_items)
+                    if name not in existing:
+                        ihc_items.append({
+                            'marker': name,
+                            'result': m.group(0)[len(name):].strip('(（）) '),
+                        })
 
     # ---- pd_l1 ----
     pd_l1: Optional[Dict[str, Any]] = None
