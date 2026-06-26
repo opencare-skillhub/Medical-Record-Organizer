@@ -369,6 +369,13 @@ _KEYWORD_TYPE_RULES: List[tuple[str, str]] = [
     # 长关键词优先（避免短词如"CT"被基因文本中的 CTNNB1 误匹配）
     ('pathology', '病理诊断'),
     ('pathology', '免疫组化'),
+    ('pathology', 'CK7'),
+    ('pathology', 'CK19'),
+    ('pathology', 'CK20'),
+    ('pathology', 'SMAD4'),
+    ('pathology', 'CDX2'),
+    ('pathology', 'SATB2'),
+    ('pathology', '粘液腺癌'),
     ('pathology', '肿瘤基因检测'),
     ('pathology', '基因检测'),
     ('pathology', '体细胞变异'),
@@ -463,8 +470,15 @@ def _apply_keyword_fallback(
                 best_type = report_type
         # 不 break，继续扫描，确保最长的关键词胜出
 
-    # 关键词得分显著更高时（匹配词更长），覆盖 LLM 结果
-    if best_kw_len > 6 and best_type != rt:
+    # LLM 返回 noise 或关键词得分显著更高 → 覆盖
+    if rt == 'noise' and best_kw_len > 2:
+        logger.info(
+            'Map 关键词兜底(noise覆盖): %s → %s (命中 "%s")',
+            filename, best_type, best_kw_len,
+        )
+        result['report_type'] = best_type
+        result['confidence'] = max(conf, 0.7)
+    elif best_kw_len > 6 and best_type != rt:
         logger.info(
             'Map 关键词兜底: %s → %s (LLM 原类型=%s conf=%.2f)',
             filename, best_type, rt, conf,
