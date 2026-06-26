@@ -540,11 +540,45 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             findings_text = findings
         else:
             findings_text = item.get('conclusion', '') or ''
+        # 跳过无内容的空行
+        if not findings_text.strip():
+            continue
+        # 提取对比信息（"较前缩小""较前相仿"等）
+        import re as _re
+        compare = ''
+        for kw in ('较前缩小', '较前增大', '较前相仿', '较前进展', '较前好转', '较前减少', '较前略'):
+            m = _re.search(kw + r'[^，。\n]{0,50}', findings_text)
+            if m:
+                compare = m.group(0)[:80]
+                break
+        # 推断检查方式
+        modality = item.get('modality', '') or ''
+        if not modality:
+            lower_text = findings_text.lower()
+            if 'ct' in lower_text: modality = 'CT'
+            elif '超声' in lower_text: modality = '超声'
+            elif 'mri' in lower_text or '核磁' in lower_text: modality = 'MRI'
+            elif 'pet' in lower_text: modality = 'PET-CT'
+            else: modality = _infer_modality(item.get('_source_file', ''))
+        # 判断部位
+        site = ''
+        if '胰' in findings_text or '肝' in findings_text or '胆' in findings_text or '脾' in findings_text:
+            site = '腹部'
+        elif '肺' in findings_text or '纵隔' in findings_text:
+            site = '胸部'
+        elif '脑' in findings_text or '基底节' in findings_text:
+            site = '头颅'
+        elif '肾上腺' in findings_text or '肾' in findings_text:
+            site = '腹部'
+
         imaging_summary.append({
             'date': date,
-            'modality': item.get('modality', '') or _infer_modality(item.get('_source_file', '')),
-            'findings': findings_text,
+            'modality': (modality + ('-' + site if site else '')).strip(),
+            'findings': findings_text if not compare else findings_text + f' 【{compare}】',
+            'compare': compare,
         })
+    # 排序：有日期按日期，空日期排到最后
+    imaging_summary.sort(key=lambda x: (x['date'] == '—', x['date'] or '9999'))
     # 从 imaging_narrative 补充
     img_narr = profile.get('imaging_narrative') or {}
     if img_narr.get('primary_lesion_timeline') and not imaging_summary:
