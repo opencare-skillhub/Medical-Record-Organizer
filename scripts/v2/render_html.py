@@ -540,11 +540,17 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             break
 
     # ---- clinical_summary (临床摘要) ----
+    # 选择最可信的临床摘要：优先取 timeline_items 最多的记录，
+    # 避免单页碎片化的 LLM 捏造（如捏造黄疸/肝转移/错误日期）
     clinical_summary = ''
+    best_tl_len = 0
     for item in (groups.get('clinical') or []):
-        if item.get('clinical_summary'):
-            clinical_summary = item['clinical_summary']
-            break
+        cs = item.get('clinical_summary') or ''
+        tl = len(item.get('timeline_items') or [])
+        # 取 timeline_items 最多的那一条（通常是完整病情概述文档）
+        if cs and tl >= best_tl_len:
+            best_tl_len = tl
+            clinical_summary = cs
 
     # ---- pathology_diagnosis (病理诊断要点) ----
     pathology_diagnosis: Optional[Dict[str, Any]] = None
