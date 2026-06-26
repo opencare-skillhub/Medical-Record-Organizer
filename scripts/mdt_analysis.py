@@ -75,6 +75,11 @@ MDT_SYNTHESIS_SCHEMA: Dict[str, Any] = {
                 },
             },
         },
+        'consultation_questions': {
+            'type': 'array',
+            'items': {'type': 'string'},
+            'description': '基于异常发现，提出3-5条下次问诊时需向医生确认的关键问题',
+        },
     },
 }
 
@@ -503,6 +508,7 @@ def run_mdt_analysis(profile: Dict[str, Any], groups: Dict[str, List[Dict[str, A
     try:
         synthesis = call_llm_with_retry(synthesis_messages, MDT_SYNTHESIS_SCHEMA, model=model)
         raw = synthesis.get('concerns') if isinstance(synthesis, dict) else None
+        questions = synthesis.get('consultation_questions') if isinstance(synthesis, dict) else None
         if isinstance(raw, list):
             concerns = [c for c in raw if isinstance(c, dict)]
     except Exception as exc:
@@ -533,6 +539,7 @@ def run_mdt_analysis(profile: Dict[str, Any], groups: Dict[str, List[Dict[str, A
     return {
         'specialty_reports': specialty_results,
         'concerns': concerns,
+        'consultation_questions': questions if isinstance(questions, list) and questions else [],
         'fallback_used': fallback_used,
         'error': None,
     }
