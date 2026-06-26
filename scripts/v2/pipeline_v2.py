@@ -238,7 +238,7 @@ def run_pipeline(
 
     # Phase 3: Shuffle
     groups = group_by_type(extracted)
-    lab_trends = merge_lab_trends(groups.get('lab', []))
+    lab_trends = merge_lab_trends(groups.get('lab', []) + groups.get('clinical', []))
 
     # Phase 4: Reduce
     lab_analysis = reduce_lab_trends(lab_trends, model=model)
