@@ -424,7 +424,7 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 elif isinstance(m, str):
                     _add_med(m, '')
 
-    # 兜底：从 sanitized 原文用正则提取处方剂量（LLM 常漏剂量字段）
+    # 兜底：从 sanitized 原文正则提取剂量（LLM 常漏剂量字段），但不新增药物条目
     if any(not t['dose'] for t in medication_table):
         import re as _re
         for item in (groups.get('clinical') or []) + (groups.get('medication') or []):
@@ -433,28 +433,43 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             if not src.exists():
                 continue
             raw = src.read_text(encoding='utf-8')
-            for m in _re.finditer(
-                r'(?:[※\[]?[甲乙丙丁戊己庚辛]*\d*%?[※\]]?\s*)'
-                r'([\u4e00-\u9fff]+\s*(?:注射液|粉针|胶囊|片剂|口服液|软膏)?[^，\n,]*)'
-                r'\s*[\d.]+\s*(?:g|mg|ml|支|瓶|袋)[^，\n]*?'
-                r'(?:静滴|静推|口服|肌注|皮下)',
-                raw,
-            ):
-                rx_text = m.group(0)
-                # 提取剂量
-                dose_m = _re.search(r'([\d.]+\s*(?:g|mg|ml|支|瓶|袋)\s*(?:×\s*[\d.]+)?)', rx_text)
-                dose = dose_m.group(1) if dose_m else ''
-                route_m = _re.search(r'(静滴|静推|口服|肌注|皮下)', rx_text)
-                route = route_m.group(1) if route_m else ''
-                name = _re.sub(r'[\d.]+\s*(?:g|mg|ml|支|瓶|袋)[\d.×\s]*', '', rx_text)
-                name = _re.sub(r'(静滴|静推|口服|肌注|皮下).*', '', name).strip()
-                name = _re.sub(r'^[甲乙丙丁戊己庚辛]*\d*%?[※\]]?\s*', '', name).strip()
-                if len(name) > 3 and name not in {'氯化钠注射液', '氯化钠注射液(辰欣)', '氯化钠注射液(双鹤)'}:
-                    _add_med(name, dose, route, '', _is_chemo(name))
+            # 对已有药物表中的每个空缺剂量，从原文匹配补充
+            for i, med in enumerate(medication_table):
+                if med['dose']:
+                    continue
+                name = med['name']
+                # 取药物名的关键标识词（括号前的主名或品牌名后的主成分）
+                key_words = name.split('(')[0].strip() if '(' in name else name
+                if len(key_words) < 4:
+                    continue
+                # 在原文中找 "关键名 + 剂量数字 + 单位" 模式的文本
+                escaped = _re.escape(key_words[:15])
+                m = _re.search(rf'{escaped}\s*.*?(\d+[.,\d]*\s*(?:g|mg|ml)\s*(?:[×xX*]\s*\d+[.,\d]*\s*(?:支|瓶|袋))?)', raw)
+                if m:
+                    dose = m.group(1).strip()
+                    medication_table[i]['dose'] = dose
+                    medication_summary[i]['value'] = dose
+                # 如果有给药方式也补上
+                route_m = _re.search(rf'{escaped}.*?(静滴|静推|口服|肌注)', raw)
+                if route_m and not medication_table[i]['route']:
+                    medication_table[i]['route'] = route_m.group(1)
 
-    # 过滤：仅保留化疗核心药物（去除激素/止吐/保肝/输液/抗凝等辅助用药）
-    medication_table = [m for m in medication_table if _is_chemo(m.get('name', ''))]
-    medication_summary = [m for m in medication_summary if _is_chemo(m.get('label', ''))]
+    # 去重：同名药保留有剂量的版本
+    deduped: Dict[str, Dict[str, str]] = {}
+    for m in medication_table:
+        name = m.get('name', '').strip()
+        # 忽略氯化钠/输液载体
+        if not name or len(name) < 4 or '氯化钠' in name or '辰欣' in name or '双鹤' in name:
+            continue
+        key = name.split('(')[0].strip()  # 用主名去重
+        if key not in deduped or (m.get('dose') and not deduped[key].get('dose')):
+            deduped[key] = m
+        elif m.get('dose') and deduped[key].get('dose') and m['dose'] != deduped[key]['dose']:
+            deduped[key + ' (另)]'] = m
+    medication_table = list(deduped.values())
+    # 同步过滤 medication_summary
+    table_names = {m['name'] for m in medication_table}
+    medication_summary = [m for m in medication_summary if m.get('label', '').strip() and '氯化钠' not in m.get('label', '')]
 
     medication_prescription_date = ''
     if med_tl.get('timeline'):
