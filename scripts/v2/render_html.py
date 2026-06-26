@@ -952,19 +952,20 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         # MDT 不可用时，基于数据生成有意义的问题摘要而非原始检验值列表
         concerns_generated = []
 
-        # 1. 肿瘤标志物异常趋势分析
+        # 1. 肿瘤标志物异常趋势分析（仅用有日期的数据点）
         tumor_alerts = []
         for name, mdata in (tumor_marker_tables or {}).items():
             rows = mdata.get('rows', [])
-            if len(rows) >= 2:
-                first_v = rows[0].get('value')
-                last_v = rows[-1].get('value')
+            dated = [r for r in rows if r.get('date') and r.get('value')]
+            if len(dated) >= 3:
                 try:
-                    if float(first_v or 0) > 0 and float(last_v or 0) > 0:
-                        change_pct = (float(last_v) - float(first_v)) / float(first_v) * 100
+                    first_v = float(dated[0].get('value', 0) or 0)
+                    last_v = float(dated[-1].get('value', 0) or 0)
+                    if first_v > 0:
+                        change_pct = (last_v - first_v) / first_v * 100
                         if abs(change_pct) > 20:
                             direction = '下降' if change_pct < 0 else '上升'
-                            tumor_alerts.append(f"{name}: 从{first_v}→{last_v} ({direction}{abs(change_pct):.0f}%)")
+                            tumor_alerts.append(f"{name}: {dated[0]['date'][:10]}={first_v}→{dated[-1]['date'][:10]}={last_v} ({direction}{abs(change_pct):.0f}%)")
                 except (ValueError, TypeError):
                     continue
         if tumor_alerts:
@@ -1025,9 +1026,17 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
     mdt_analysis = profile.get('mdt_analysis') or {}
     consultation_questions = mdt_analysis.get('consultation_questions') or []
     if not consultation_questions:
-        consultation_questions = _generate_questions_with_llm(
+        llm_q = _generate_questions_with_llm(
             tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items
-        ) or ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
+        )
+        if llm_q:
+            consultation_questions = llm_q
+        else:
+            # LLM 不可用时，基于最近数据变化生成有意义的问题
+            q = _build_data_driven_questions(
+                tumor_marker_tables, genetic_highlights, medication_table, imaging_summary, lab_abnormal
+            )
+            consultation_questions = q if q else ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
 
     # ---- files ----
     files: List[Dict[str, Any]] = []
@@ -1307,6 +1316,39 @@ def _generate_questions_with_llm(
         return qs[:5] if isinstance(qs, list) else []
     except Exception:
         return []
+
+
+def _build_data_driven_questions(tumor_marker_tables, genetic_highlights, medication_table, imaging_summary, lab_abnormal) -> list:
+    """基于数据生成问诊建议（无需LLM，仅用有明确日期的最近趋势点）。"""
+    q = []
+    for name, mdata in (tumor_marker_tables or {}).items():
+        rows = mdata.get('rows', [])
+        # 仅取有日期的数据点
+        dated = [r for r in rows if r.get('date') and r.get('value')]
+        if len(dated) >= 3:
+            try:
+                vals = [(r['date'], float(r['value'])) for r in dated[-3:]]
+                if len(vals) >= 2 and vals[-2][1] > 0:
+                    pct = (vals[-1][1] - vals[-2][1]) / vals[-2][1] * 100
+                    if abs(pct) > 15:
+                        direction = '升高' if pct > 0 else '下降'
+                        q.append(f'{name}近次检测{direction}{abs(pct):.0f}%（{vals[-2][1]}→{vals[-1][1]}，{vals[-1][0][:10]}），需向医生了解原因及临床意义')
+            except (ValueError, TypeError):
+                continue
+    pathogenic = [g for g in (genetic_highlights or []) if g.get('significance') == 'pathogenic']
+    if pathogenic:
+        names = '、'.join(g['gene'] for g in pathogenic[:3])
+        q.append(f'检测到{names}致病突变，需向医生确认是否影响靶向/免疫治疗选择')
+    drug_genes = [g for g in (genetic_highlights or []) if g.get('significance') == 'drug']
+    high_risk = [g for g in drug_genes if '风险较高' in str(g.get('result','')) or '高风险' in str(g.get('result',''))]
+    if high_risk:
+        names = '、'.join(g['gene'] for g in high_risk[:2])
+        q.append(f'{names}基因型提示特定化疗药不良反应高风险，需确认用药前是否已做剂量调整')
+    if imaging_summary:
+        compares = [im.get('compare','') for im in imaging_summary if im.get('compare')]
+        if compares:
+            q.append(f'影像检查显示{compares[-1][:40]}，需向医生了解整体疗效评估（CR/PR/SD/PD）')
+    return q[:5]
 
 
 def render_html_report(
