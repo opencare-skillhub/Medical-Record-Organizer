@@ -452,6 +452,10 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 if len(name) > 3 and name not in {'氯化钠注射液', '氯化钠注射液(辰欣)', '氯化钠注射液(双鹤)'}:
                     _add_med(name, dose, route, '', _is_chemo(name))
 
+    # 过滤：仅保留化疗核心药物（去除激素/止吐/保肝/输液/抗凝等辅助用药）
+    medication_table = [m for m in medication_table if _is_chemo(m.get('name', ''))]
+    medication_summary = [m for m in medication_summary if _is_chemo(m.get('label', ''))]
+
     medication_prescription_date = ''
     if med_tl.get('timeline'):
         medication_prescription_date = med_tl['timeline'][0].get('start_date', '') or ''
