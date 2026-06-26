@@ -519,22 +519,12 @@
       {% endfor %}
       </div>
       <canvas id="marker_chart" width="700" height="300" style="width:100%;max-width:700px;height:300px;border:1px solid #e0e0e0;border-radius:8px"></canvas>
-      <div id="marker_chart_data" style="display:none">
-      {% for marker_name, marker_data in tumor_marker_tables.items() %}
-        {{ marker_name }}||{{ marker_data.rows | tojson }}||
-      {% endfor %}
-      </div>
       <script>
+      // 内嵌数据-避免 textContent 分裂带来的乱码
       var _chart_data = {};
-      var _div = document.getElementById('marker_chart_data');
-      if (_div) {
-        var parts = _div.textContent.split('||');
-        for (var i = 0; i < parts.length; i += 3) {
-          var name = parts[i].trim();
-          var json = parts[i+1];
-          if (name && json) { try { _chart_data[name] = JSON.parse(json); } catch(e) {} }
-        }
-      }
+      {% for marker_name, marker_data in tumor_marker_tables.items() %}
+      _chart_data['{{ marker_name }}'] = {{ marker_data.rows | tojson }};
+      {% endfor %}
       var _active_markers = {};
       var _chart_mode = 'pct'; // pct=归一化%, abs=绝对值
       function setMode(m) { _chart_mode = m;
@@ -629,25 +619,6 @@
         if(_chart_data['CA199']){toggleMarker('CA199');}else{var k=Object.keys(_chart_data);if(k.length)toggleMarker(k[0]);}
       },200);
       </script>
-            if (i === pts.length - 1) { ctx.fillStyle = color; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(name + ':' + p.val.toFixed(1), x + 6, y - 6); }
-          });
-        });
-      }
-      function toggleMarker(name) {
-        if (_active_markers[name] === undefined) { _active_markers = {}; }
-        _active_markers[name] = !_active_markers[name];
-        var btn = document.getElementById('btn_' + name);
-        if (btn) {
-          var color = btn.getAttribute('data-color') || '#1a73e8';
-          btn.style.background = _active_markers[name] ? color : '#fff';
-          btn.style.color = _active_markers[name] ? '#fff' : color;
-        }
-        drawChart();
-      }
-      // 默认 CA199
-      setTimeout(function() {
-        if (_chart_data['CA199']) { toggleMarker('CA199'); }
-        else { var k = Object.keys(_chart_data); if (k.length) toggleMarker(k[0]); }
       }, 200);
       </script>
       {% if marker_sync_alert %}<div style="color:#c83333;font-size:13px">⚠️ {{ marker_sync_alert }}</div>{% endif %}
