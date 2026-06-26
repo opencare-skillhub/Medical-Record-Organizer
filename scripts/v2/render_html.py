@@ -581,10 +581,18 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
 
     # ---- ihc_markers (免疫组化) ----
     ihc_items: List[Dict[str, Any]] = []
+    # 主来源：pathology 组的 ihc_markers
     for item in (groups.get('pathology') or []):
         for m in (item.get('ihc_markers') or []):
             if isinstance(m, dict):
                 ihc_items.append(m)
+    # 补充来源：clinical 组也包含部分 IHC 数据（如病情概述混合文档）
+    for item in (groups.get('clinical') or []):
+        for m in (item.get('ihc_markers') or []):
+            if isinstance(m, dict):
+                seen = {(i.get('marker'), i.get('result')) for i in ihc_items}
+                if (m.get('marker'), m.get('result')) not in seen:
+                    ihc_items.append(m)
     # 兜底：LLM 未提取免疫组化时，从 sanitized 原文正则提取
     if not ihc_items and (groups.get('pathology') or []):
         import re
