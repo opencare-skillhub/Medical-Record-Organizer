@@ -752,10 +752,77 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             else:
                 key_concerns.append({'text': str(item), 'priority': 'medium'})
     else:
-        for a in critical_alerts:
-            key_concerns.append(a['message'])
-        if img_narr.get('data_limitation'):
-            key_concerns.append(img_narr['data_limitation'])
+        # MDT 不可用时，基于数据生成有意义的问题摘要而非原始检验值列表
+        concerns_generated = []
+
+        # 1. 肿瘤标志物异常趋势分析
+        tumor_alerts = []
+        for name, mdata in (tumor_marker_tables or {}).items():
+            rows = mdata.get('rows', [])
+            if len(rows) >= 2:
+                first_v = rows[0].get('value')
+                last_v = rows[-1].get('value')
+                try:
+                    if float(first_v or 0) > 0 and float(last_v or 0) > 0:
+                        change_pct = (float(last_v) - float(first_v)) / float(first_v) * 100
+                        if abs(change_pct) > 20:
+                            direction = '下降' if change_pct < 0 else '上升'
+                            tumor_alerts.append(f"{name}: 从{first_v}→{last_v} ({direction}{abs(change_pct):.0f}%)")
+                except (ValueError, TypeError):
+                    continue
+        if tumor_alerts:
+            concerns_generated.append({
+                'text': '肿瘤标志物变化趋势',
+                'analysis': '、'.join(tumor_alerts[:5]),
+                'priority': 'high',
+                'priority_label': '高',
+                'disciplines': ['肿瘤科'],
+                'suggested_direction': '结合影像检查评估疗效，若持续上升需排查进展',
+            })
+
+        # 2. 基因检测致病突变
+        pathogenic_genes = [g for g in genetic_highlights if g.get('significance') == 'pathogenic']
+        if pathogenic_genes:
+            pg_names = [g['gene'] for g in pathogenic_genes[:5]]
+            concerns_generated.append({
+                'text': f'致病性基因突变: {", ".join(pg_names)}',
+                'analysis': f'检测到{len(pathogenic_genes)}个致病性基因突变，需关注靶向/免疫治疗机会及家族遗传风险',
+                'priority': 'high',
+                'priority_label': '高',
+                'disciplines': ['肿瘤科', '遗传咨询'],
+                'suggested_direction': '评估靶向药物匹配及胚系遗传检测',
+            })
+
+        # 3. 肝功能异常
+        liver_abnormal = [a for a in (lab_abnormal or []) if a.get('name', '') in ('ALT', 'AST', 'GGT', 'TBIL', 'DBIL')]
+        if liver_abnormal:
+            items = ', '.join(f"{a['name']}={a['value']}" for a in liver_abnormal[:5])
+            concerns_generated.append({
+                'text': f'肝功能指标异常',
+                'analysis': items,
+                'priority': 'medium',
+                'priority_label': '中',
+                'disciplines': ['肿瘤科', '消化科'],
+                'suggested_direction': '排查化疗药物性肝损伤或胆道梗阻',
+            })
+
+        # 4. 用药方案复杂度
+        if len(medication_table) >= 3:
+            concerns_generated.append({
+                'text': '多线化疗方案更替',
+                'analysis': f'已使用{len(medication_table)}种药物，经历多次方案调整，需关注耐药性和累积毒性',
+                'priority': 'medium',
+                'priority_label': '中',
+                'disciplines': ['肿瘤科'],
+                'suggested_direction': '评估化疗敏感性变化及后续治疗方案选择',
+            })
+
+        if concerns_generated:
+            key_concerns = concerns_generated
+        else:
+            # 真正的兜底
+            for a in critical_alerts[:3]:
+                key_concerns.append({'text': a.get('message', ''), 'priority': 'low', 'analysis': '', 'priority_label': '低'})
 
     # ---- consultation_questions ----
     # 从 MDT 分析中获取 LLM 生成的咨询建议，失败时根据数据缺口动态生成
