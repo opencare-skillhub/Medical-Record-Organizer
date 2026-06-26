@@ -702,11 +702,25 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             break
 
     # ---- timeline_items (临床时间轴) ----
+    # ---- timeline_items (临床时间轴) ----
+    # 仅取 timeline_items 最多的一条 clinical 记录作为权威时间轴
+    # 不混入其他来源、不合并碎片，避免重复和 LLM 幻觉污染
     timeline_items: List[Dict[str, Any]] = []
+    _TL_CUTOFF = '2026-01-01'
+
+    best_tl: List[Dict[str, Any]] = []
     for item in (groups.get('clinical') or []):
-        for t in (item.get('timeline_items') or []):
+        tl = item.get('timeline_items') or []
+        if len(tl) > len(best_tl):
+            best_tl = tl
+
+    if best_tl:
+        for t in best_tl:
             if isinstance(t, dict):
-                timeline_items.append(t)
+                date = t.get('date', '') or ''
+                if date and date <= _TL_CUTOFF:
+                    timeline_items.append(t)
+        timeline_items.sort(key=lambda x: x.get('date', '') or '')
 
     # chart_svg_ca199（保留兼容）
     chart_svg_ca199 = ''
