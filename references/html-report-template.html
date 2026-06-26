@@ -505,6 +505,11 @@
     <!-- 肿瘤标志物趋势图（交互式多选，默认CA199） -->
     {% if tumor_marker_tables %}
       <h2 style="margin-top:14px">肿瘤标志物趋势 <span id="active_marker_label" style="font-size:14px;color:#1a73e8">(CA199)</span></h2>
+      <div id="mode_switch" style="margin-bottom:8px;font-size:13px;color:#888">
+        <span style="cursor:pointer;text-decoration:underline" onclick="setMode('pct')" id="mode_pct" class="mode_active">▼ 归一化(%)</span>
+        &nbsp;|&nbsp;
+        <span style="cursor:pointer;text-decoration:underline" onclick="setMode('abs')" id="mode_abs">绝对值</span>
+      </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px" id="marker_buttons">
       {% set colors = ['#1a73e8','#c83333','#2e7d32','#e67e22','#8e44ad','#16a085','#c0392b','#2980b9'] %}
       {% for marker_name, marker_data in tumor_marker_tables.items() %}
@@ -531,77 +536,99 @@
         }
       }
       var _active_markers = {};
+      var _chart_mode = 'pct'; // pct=归一化%, abs=绝对值
+      function setMode(m) { _chart_mode = m;
+        document.getElementById('mode_pct').innerHTML = m==='pct'?'▼ 归一化(%)':'归一化(%)';
+        document.getElementById('mode_abs').innerHTML = m==='abs'?'▼ 绝对值':'绝对值';
+        drawChart();
+      }
       function drawChart() {
         var canvas = document.getElementById('marker_chart');
         if (!canvas) return;
         var ctx = canvas.getContext('2d');
         var W = canvas.width, H = canvas.height;
         ctx.clearRect(0, 0, W, H);
-        // 收集所有选中标记物的数据点
-        var allPoints = {};
-        var activeNames = Object.keys(_active_markers).filter(function(k) { return _active_markers[k]; });
-        if (activeNames.length === 0) { ctx.fillStyle = '#999'; ctx.font = '14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('点击上方按钮选择要显示的标志物', W/2, H/2); return; }
-        document.getElementById('active_marker_label').textContent = '(' + activeNames.join(', ') + ')';
-        var minV = Infinity, maxV = -Infinity;
-        var series = {};
-        activeNames.forEach(function(name) {
-          var rows = _chart_data[name] || [];
-          var pts = [];
-          rows.forEach(function(r) {
-            var d = r.date, v = parseFloat(r.value);
-            if (d && !isNaN(v)) { pts.push({date:d,val:v}); if (v < minV) minV = v; if (v > maxV) maxV = v; }
+        var activeNames = Object.keys(_active_markers).filter(function(k){return _active_markers[k];});
+        if (activeNames.length===0) { ctx.fillStyle='#999';ctx.font='14px sans-serif';ctx.textAlign='center';ctx.fillText('点击上方按钮选择要显示的标志物',W/2,H/2);return; }
+        document.getElementById('active_marker_label').textContent='('+activeNames.join(', ')+')';
+        var pal=['#1a73e8','#c83333','#2e7d32','#e67e22','#8e44ad','#16a085','#c0392b','#2980b9','#f39c12','#27ae60','#d35400','#7f8c8d'];
+        var series={}; var allDates=[];
+        activeNames.forEach(function(name){
+          var pts=[]; (_chart_data[name]||[]).forEach(function(r){
+            var d=r.date,v=parseFloat(r.value); if(d&&!isNaN(v)) pts.push({date:d,val:v,raw:v});
           });
-          series[name] = pts;
-        });
-        if (!isFinite(minV)) return;
-        var range = Math.max(maxV - minV, 1);
-        var yPad = range * 0.1;
-        minV = Math.max(0, minV - yPad); maxV = maxV + yPad; range = maxV - minV;
-        var pad = {t:25, r:20, b:40, l:50};
-        var cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
-        // 网格
-        ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
-        for (var g = 0; g <= 4; g++) {
-          var y = pad.t + ch * (1 - g/4);
-          ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
-          ctx.fillStyle = '#888'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
-          ctx.fillText((minV + range * g/4).toFixed(1), pad.l - 5, y + 4);
-        }
-        // 采集所有日期
-        var allDates = [];
-        activeNames.forEach(function(name) {
-          (series[name] || []).forEach(function(p) { if (allDates.indexOf(p.date) < 0) allDates.push(p.date); });
+          if(pts.length<2) return;
+          var base=pts[0].raw;
+          pts.forEach(function(p){ p.norm=base>0?p.raw/base*100:0; });
+          series[name]=pts;
+          pts.forEach(function(p){ if(allDates.indexOf(p.date)<0) allDates.push(p.date); });
         });
         allDates.sort();
-        var maxLabels = Math.min(allDates.length, 8);
-        var labelStep = Math.max(1, Math.floor(allDates.length / maxLabels));
-        allDates.forEach(function(d, i) {
-          if (i % labelStep === 0 || i === allDates.length - 1) {
-            ctx.fillStyle = '#666'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText(d.slice(-5), pad.l + cw * (i / (allDates.length - 1 || 1)), H - pad.b + 16);
+        if(allDates.length<1) return;
+        var minV=Infinity,maxV=-Infinity;
+        Object.keys(series).forEach(function(name){
+          series[name].forEach(function(p){
+            var v=_chart_mode==='pct'?p.norm:p.raw; if(v<minV)minV=v; if(v>maxV)maxV=v;
+          });
+        });
+        if(!isFinite(minV)) return;
+        var range=Math.max(maxV-minV,1); var yPad=range*0.1;
+        minV-=yPad; maxV+=yPad; range=maxV-minV;
+        var pad={t:25,r:25,b:40,l:50}; var cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
+        // 网格
+        ctx.strokeStyle='#eee';ctx.lineWidth=1;
+        for(var g=0;g<=4;g++){
+          var y=pad.t+ch*(1-g/4);
+          ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+          ctx.fillStyle='#888';ctx.font='11px sans-serif';ctx.textAlign='right';
+          var label=_chart_mode==='pct'?((minV+range*g/4).toFixed(0)+'%'):((minV+range*g/4).toFixed(1));
+          ctx.fillText(label,pad.l-5,y+4);
+        }
+        // 日期
+        var ls=Math.max(1,Math.floor(allDates.length/8));
+        allDates.forEach(function(d,i){
+          if(i%ls===0||i===allDates.length-1){
+            ctx.fillStyle='#666';ctx.font='10px sans-serif';ctx.textAlign='center';
+            ctx.fillText(d.slice(-5),pad.l+cw*(i/(allDates.length-1||1)),H-pad.b+16);
           }
         });
-        // 绘制每条折线
-        var palette = ['#1a73e8','#c83333','#2e7d32','#e67e22','#8e44ad','#16a085','#c0392b','#2980b9'];
-        var ci = 0;
-        activeNames.forEach(function(name) {
-          var pts = series[name] || [];
-          if (pts.length < 2) return;
-          var color = palette[ci % palette.length]; ci++;
-          ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
-          pts.forEach(function(p, i) {
-            var x; // 映射到统一日期轴
-            var di = allDates.indexOf(p.date);
-            x = pad.l + cw * (di / (allDates.length - 1 || 1));
-            var y = pad.t + ch * (1 - (p.val - minV) / range);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        // 绘制折线
+        var ci=0;
+        Object.keys(series).forEach(function(name){
+          var pts=series[name]; if(pts.length<2) return;
+          var color=pal[ci%pal.length]; ci++;
+          ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();
+          pts.forEach(function(p,i){
+            var x=pad.l+cw*(allDates.indexOf(p.date)/(allDates.length-1||1));
+            var v=_chart_mode==='pct'?p.norm:p.raw;
+            var y=pad.t+ch*(1-(v-minV)/range);
+            if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+          });ctx.stroke();
+          // 数据点+标注
+          pts.forEach(function(p,i){
+            var x=pad.l+cw*(allDates.indexOf(p.date)/(allDates.length-1||1));
+            var v=_chart_mode==='pct'?p.norm:p.raw;
+            var y=pad.t+ch*(1-(v-minV)/range);
+            ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,3,0,2*Math.PI);ctx.fill();
+            if(i===pts.length-1){
+              ctx.fillStyle=color;ctx.font='bold 10px sans-serif';ctx.textAlign='left';
+              var lbl=_chart_mode==='pct'?(name+' '+((p.norm-100).toFixed(0)>0?'+':'')+(p.norm-100).toFixed(0)+'%'):(name+':'+p.raw.toFixed(1));
+              ctx.fillText(lbl,x+6,y-6);
+            }
           });
-          ctx.stroke();
-          // 数据点标注最后一次
-          pts.forEach(function(p, i) {
-            var x = pad.l + cw * (allDates.indexOf(p.date) / (allDates.length - 1 || 1));
-            var y = pad.t + ch * (1 - (p.val - minV) / range);
-            ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.fill();
+        });
+      }
+      function toggleMarker(name){
+        if(Object.keys(_active_markers).length===0){_active_markers={};}
+        _active_markers[name]=!_active_markers[name];
+        var btn=document.getElementById('btn_'+name);
+        if(btn){var c=btn.getAttribute('data-color')||'#1a73e8';btn.style.background=_active_markers[name]?c:'#fff';btn.style.color=_active_markers[name]?'#fff':c;}
+        drawChart();
+      }
+      setTimeout(function(){
+        if(_chart_data['CA199']){toggleMarker('CA199');}else{var k=Object.keys(_chart_data);if(k.length)toggleMarker(k[0]);}
+      },200);
+      </script>
             if (i === pts.length - 1) { ctx.fillStyle = color; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(name + ':' + p.val.toFixed(1), x + 6, y - 6); }
           });
         });
