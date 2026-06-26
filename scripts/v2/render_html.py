@@ -825,25 +825,54 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 key_concerns.append({'text': a.get('message', ''), 'priority': 'low', 'analysis': '', 'priority_label': '低'})
 
     # ---- consultation_questions ----
-    # 从 MDT 分析中获取 LLM 生成的咨询建议，失败时根据数据缺口动态生成
+    # 从 MDT 分析中获取 LLM 生成的咨询建议，失败时基于数据异常动态生成
     mdt_analysis = profile.get('mdt_analysis') or {}
     consultation_questions = mdt_analysis.get('consultation_questions') or []
     if not consultation_questions:
-        questions = []
-        if not imaging_summary:
-            questions.append('建议补充历次影像检查报告（CT/MRI/PET-CT），以对照评估病灶变化')
-        if not tumor_marker_tables:
-            questions.append('建议补充历次肿瘤标志物结果以完善趋势分析')
-        if not medication_table:
-            questions.append('建议补充用药方案详细信息（药物、剂量、周期、疗效评估）')
-        if not pathology_diagnosis:
-            questions.append('建议补充病理报告（组织学类型、TNM分期、免疫组化、基因检测结果）')
-        else:
-            # 已有病理报告，问更具体的问题
-            if not ihc_items:
-                questions.append('建议补充免疫组化结果（MSI/MMR状态、HER2、PD-L1等）')
-        if questions:
-            consultation_questions = questions
+        q = []
+
+        # 基于实际异常发现生成问诊建议
+        if tumor_marker_tables:
+            # 找出趋势异常的标志物
+            rising = []
+            falling = []
+            for name, mdata in tumor_marker_tables.items():
+                rows = mdata.get('rows', [])
+                if len(rows) >= 2:
+                    try:
+                        first_v = float(rows[0].get('value', 0) or 0)
+                        last_v = float(rows[-1].get('value', 0) or 0)
+                        if first_v > 0:
+                            pct = (last_v - first_v) / first_v * 100
+                            if pct > 20: rising.append(f'{name}(+{pct:.0f}%)')
+                            elif pct < -20: falling.append(f'{name}({pct:.0f}%)')
+                    except (ValueError, TypeError): continue
+            if rising:
+                q.append(f'{"、".join(rising)}持续上升，需向医生确认是否提示疾病进展？是否需调整治疗方案？')
+            if falling:
+                q.append(f'{"、".join(falling)}呈下降趋势，需确认当前治疗是否持续有效？')
+
+        abnormal_markers = [a for a in (lab_abnormal or []) if a.get('name') in ('ALT','AST','GGT','TBIL','CREA','WBC','PLT','Hb')]
+        if abnormal_markers:
+            items = '、'.join(f"{a['name']}={a['value']}" for a in abnormal_markers[:4])
+            q.append(f'检查发现肝功能/血常规异常（{items}），需向医生确认是否需调整化疗方案或加用保肝/升白药物？')
+
+        if genetic_highlights:
+            path_genes = [g for g in genetic_highlights if g.get('significance') == 'pathogenic']
+            if path_genes:
+                q.append(f'检测到{",".join(g["gene"] for g in path_genes[:3])}致病突变，需向医生确认是否影响靶向/免疫治疗选择？家属是否需遗传咨询？')
+
+        if len(medication_table) >= 5:
+            q.append(f'已使用多线化疗（{len(medication_table)}种药物），需向医生了解目前耐药性情况及后续治疗备选方案')
+
+        if not q:
+            # 兜底：基础建议
+            if not imaging_summary: q.append('建议补充历次影像检查报告（CT/MRI/PET-CT），以对照评估病灶变化')
+            if not tumor_marker_tables: q.append('建议补充历次肿瘤标志物结果以完善趋势分析')
+            if not medication_table: q.append('建议补充用药方案详细信息（药物、剂量、周期）')
+            if not pathology_diagnosis: q.append('建议补充病理报告（组织学类型、TNM分期、免疫组化）')
+        if q:
+            consultation_questions = q[:5]
         else:
             consultation_questions = ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
 
