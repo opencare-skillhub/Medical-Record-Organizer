@@ -852,6 +852,12 @@ def _generate_multi_marker_svg(tumor_marker_tables: Dict[str, Any]) -> str:
         f'style="max-width:100%;height:auto;">'
     )
     parts.append(f'<rect width="{width}" height="{height}" fill="#fafbfc"/>')
+    # 图标题
+    parts.append(
+        f'<text x="{width / 2:.1f}" y="{pad_top - 2:.1f}" font-size="12" '
+        f'fill="#333" text-anchor="middle" font-weight="700">'
+        f'相对首值变化，首值=100</text>'
+    )
 
     # Y 轴网格 + 标签（80/100/120）
     for tick in (80, 100, 120):

@@ -92,11 +92,27 @@ def convert_case_data_to_profile_groups(
     if pathology_group:
         groups['pathology'] = pathology_group
 
+    # 添加 basic_info group 以便 render 正确提取人口统计信息
+    groups['basic_info'] = [{
+        '_source_file': 'basic_info',
+        'document_date': '2025-03-31',
+        'report_date': '2025-03-31',
+        'report_type': 'basic_info',
+        'demographics': demographics,
+        'findings': [],
+        'conclusion': '',
+        'diagnoses': [{'name': demographics.get('primary_diagnosis', ''), 'icd10': demographics.get('icd_code', '')}],
+        'test_items': [],
+        'medications': [],
+    }]
+
     # ======== 10. 组装 profile ========
+    output_dir = Path(__file__).resolve().parent.parent / 'output'
     profile = {
         'patient_id': 'P_test_case',
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'input_dir': str(Path(__file__).resolve().parent.parent),
+        'output_dir': str(output_dir),
         'file_count': 0,
         'map_count': 0,
         'groups': {k: len(v) for k, v in groups.items()},
@@ -265,9 +281,15 @@ def _build_pathology_group(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]
         specimen_type = '病理'
         test_items = []
 
-        # 提取免疫组化
+        # 提取免疫组化（两种格式：test_items 和 ihc_markers）
         ihc_items = _extract_ihc(text)
         test_items.extend(ihc_items)
+        ihc_markers_list = []
+        for item in ihc_items:
+            ihc_markers_list.append({
+                'marker': item.get('gene_name', ''),
+                'result': item.get('detection_result', ''),
+            })
 
         # 提取基因检测
         gene_items = _extract_genes(text)
@@ -293,6 +315,7 @@ def _build_pathology_group(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]
             'findings': findings,
             'conclusion': conclusion,
             'test_items': test_items,
+            'ihc_markers': ihc_markers_list,
             'lab_values': [],
             'medications': [],
             'diagnoses': [],
@@ -698,6 +721,12 @@ def main():
     if html_path and html_path.exists():
         print(f"\n✅ HTML 报告已生成: {html_path}")
         print(f"   文件大小: {html_path.stat().st_size:,} 字节")
+
+        # 复制到 pancreatic_cancer_case_report_real.html（用户满意版本）
+        import shutil
+        named_path = html_path.parent / 'pancreatic_cancer_case_report_real.html'
+        shutil.copy2(html_path, named_path)
+        print(f"📄 已另存为: {named_path}")
 
         # 验证多指标图表
         html_text = html_path.read_text(encoding='utf-8')

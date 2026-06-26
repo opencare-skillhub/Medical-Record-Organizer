@@ -205,8 +205,26 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         findings = item.get('findings')
         if isinstance(findings, list):
             summary_parts.extend(str(f) for f in findings if f)
+        elif isinstance(findings, str) and findings:
+            summary_parts.append(findings)
         if item.get('conclusion'):
             summary_parts.append(str(item['conclusion']))
+        # 兜底：取 report_summary 或 pathology_diagnosis 的文本作为摘要
+        if not summary_parts:
+            rs = item.get('report_summary')
+            if rs:
+                summary_parts.append(str(rs)[:300])
+        if not summary_parts:
+            pd = item.get('pathology_diagnosis')
+            if isinstance(pd, str):
+                summary_parts.append(pd[:300])
+        # 取第一条 test_item 作为快照
+        test_items = item.get('test_items')
+        if not summary_parts and test_items:
+            genes = [f"{ti.get('gene_name','')}: {ti.get('detection_result','')}"[:60]
+                     for ti in test_items[:3] if isinstance(ti, dict)]
+            if genes:
+                summary_parts.append('; '.join(genes))
         pathology.append({
             'label': item.get('_source_file', ''),
             'type': item.get('specimen_type', '') or '病理',
