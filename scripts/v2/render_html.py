@@ -347,6 +347,36 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                     'tags': [risk] if risk else [],
                 })
 
+    # 3. 补充：从 clinical 组提取基因报告体细胞结论页缺失的突变
+    _gene_names_seen = {g['gene'] for g in genetic_highlights}
+    for item in (groups.get('clinical') or []):
+        for gene in (item.get('test_items') or []):
+            if not isinstance(gene, dict):
+                continue
+            gn = (gene.get('gene_name') or '').strip()
+            result = gene.get('detection_result', '') or gene.get('result', '') or ''
+            # 兜底提取基因名
+            if not gn and result:
+                import re as _re
+                m = _re.match(r'([A-Z0-9]+)', result.strip())
+                if m:
+                    gn = m.group(1)
+            if not gn or gn in _gene_names_seen:
+                continue
+            if not result or len(result) < 3:
+                continue
+            _gene_names_seen.add(gn)
+            genetic_highlights.append({
+                'category': 'gene', 'gene': gn, 'marker': gn,
+                'mutation': result[:120], 'result': result[:120],
+                'pathogenic': gene.get('is_pathogenic', False),
+                'significance': 'mutation',
+                'is_critical': gene.get('is_pathogenic', False),
+                'abundance': gene.get('abundance', ''),
+                'evidence_tier': '', 'tier_label': '临床参考',
+                'tags': ['病情概述引用'],
+            })
+
     # 排序：致病 > 有等级突变 > VUS > 药敏
     _SIG_ORDER = {'pathogenic': 0, 'mutation': 1, 'drug': 2}
     genetic_highlights.sort(key=lambda x: _SIG_ORDER.get(x.get('significance', ''), 99))
