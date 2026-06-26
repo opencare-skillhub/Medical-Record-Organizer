@@ -399,57 +399,52 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
         medication_summary.append({'label': name, 'value': dose, 'is_critical': is_chemo})
         medication_table.append({'name': name, 'dose': dose, 'route': route, 'purpose': purpose or ('化疗' if is_chemo else '')})
 
-    # 主来源：medication_timeline
-    for med in (med_tl.get('timeline') or []):
-        _add_med(
-            med.get('name', '') or med.get('drug', ''),
-            med.get('dosage') or med.get('dose', '') or '',
-            med.get('route', ''),
-            med.get('purpose', '') or med.get('type', ''),
-            _is_chemo(med.get('name', '') or med.get('drug', '')),
-        )
+    # 选包含化疗药物的最近处方记录（优先有化疗药，其次药物数最多）
+    best_clinical = None
+    best_chemo_count = -1
+    for item in (groups.get('clinical') or []):
+        meds = item.get('medications') or []
+        if not meds:
+            continue
+        chemo_count = sum(1 for m in meds if isinstance(m, dict) and _is_chemo(m.get('name', '') or m.get('drug', '')))
+        if chemo_count > best_chemo_count or (chemo_count == best_chemo_count and (item.get('document_date') or '') > (best_clinical.get('document_date') or '') if best_clinical else True):
+            best_chemo_count = chemo_count
+            best_clinical = item
 
-    # 补充：从 clinical 和 medication 组的 medications 字段
-    for grp_key in ('clinical', 'medication'):
-        for item in (groups.get(grp_key) or []):
-            for m in (item.get('medications') or []):
-                if isinstance(m, dict):
-                    _add_med(
-                        m.get('name', '') or m.get('drug', ''),
-                        m.get('dosage') or m.get('dose', '') or '',
-                        m.get('route', ''),
-                        m.get('purpose', '') or m.get('type', ''),
-                        _is_chemo(m.get('name', '') or m.get('drug', '')),
-                    )
-                elif isinstance(m, str):
-                    _add_med(m, '')
+    if best_clinical:
+        for m in (best_clinical.get('medications') or []):
+            if isinstance(m, dict):
+                _add_med(
+                    m.get('name', '') or m.get('drug', ''),
+                    m.get('dosage') or m.get('dose', '') or '',
+                    m.get('route', ''),
+                    m.get('purpose', '') or m.get('type', ''),
+                    _is_chemo(m.get('name', '') or m.get('drug', '')),
+                )
+            elif isinstance(m, str):
+                _add_med(m, '')
+        if best_clinical.get('document_date'):
+            medication_prescription_date = best_clinical['document_date']
 
-    # 兜底：从 sanitized 原文正则提取剂量（LLM 常漏剂量字段），但不新增药物条目
-    if any(not t['dose'] for t in medication_table):
+    # 兜底：从最佳处方的 sanitized 原文用正则补充剂量
+    if best_clinical and any(not t['dose'] for t in medication_table):
         import re as _re
-        for item in (groups.get('clinical') or []) + (groups.get('medication') or []):
-            fname = item.get('_source_file', '')
-            src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
-            if not src.exists():
-                continue
+        fname = best_clinical.get('_source_file', '')
+        src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+        if src.exists():
             raw = src.read_text(encoding='utf-8')
-            # 对已有药物表中的每个空缺剂量，从原文匹配补充
             for i, med in enumerate(medication_table):
                 if med['dose']:
                     continue
                 name = med['name']
-                # 取药物名的关键标识词（括号前的主名或品牌名后的主成分）
                 key_words = name.split('(')[0].strip() if '(' in name else name
                 if len(key_words) < 4:
                     continue
-                # 在原文中找 "关键名 + 剂量数字 + 单位" 模式的文本
                 escaped = _re.escape(key_words[:15])
                 m = _re.search(rf'{escaped}\s*.*?(\d+[.,\d]*\s*(?:g|mg|ml)\s*(?:[×xX*]\s*\d+[.,\d]*\s*(?:支|瓶|袋))?)', raw)
                 if m:
-                    dose = m.group(1).strip()
-                    medication_table[i]['dose'] = dose
-                    medication_summary[i]['value'] = dose
-                # 如果有给药方式也补上
+                    medication_table[i]['dose'] = m.group(1).strip()
+                    medication_summary[i]['value'] = m.group(1).strip()
                 route_m = _re.search(rf'{escaped}.*?(静滴|静推|口服|肌注)', raw)
                 if route_m and not medication_table[i]['route']:
                     medication_table[i]['route'] = route_m.group(1)
