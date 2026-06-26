@@ -380,49 +380,77 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
     medication_table: List[Dict[str, Any]] = []
     med_tl = profile.get('medication_timeline') or {}
     seen_meds: set = set()
+    _MED_CHEMO = {'吉西他滨', '紫杉醇', '白蛋白紫杉醇', '氟尿嘧啶', '奥沙利铂', '伊立替康',
+                  '卡培他滨', '多西他赛', '顺铂', '卡铂', '培美曲塞', '环磷酰胺'}
 
-    def _add_med(name: str, dose: str, route: str = '', purpose: str = '') -> None:
+    def _is_chemo(name: str) -> bool:
+        for kw in _MED_CHEMO:
+            if kw in name:
+                return True
+        return False
+
+    def _add_med(name: str, dose: str = '', route: str = '', purpose: str = '', is_chemo: bool = False) -> None:
         if not name:
             return
         key = (name.strip().lower(), str(dose).strip())
         if key in seen_meds:
             return
         seen_meds.add(key)
-        medication_summary.append({'label': name, 'value': dose, 'is_critical': False})
-        medication_table.append({'name': name, 'dose': dose, 'route': route, 'purpose': purpose})
+        medication_summary.append({'label': name, 'value': dose, 'is_critical': is_chemo})
+        medication_table.append({'name': name, 'dose': dose, 'route': route, 'purpose': purpose or ('化疗' if is_chemo else '')})
 
-    # 主来源：medication_timeline（reduce_medication_history 的输出）
+    # 主来源：medication_timeline
     for med in (med_tl.get('timeline') or []):
         _add_med(
             med.get('name', '') or med.get('drug', ''),
             med.get('dosage') or med.get('dose', '') or '',
             med.get('route', ''),
             med.get('purpose', '') or med.get('type', ''),
+            _is_chemo(med.get('name', '') or med.get('drug', '')),
         )
 
-    # 补充来源：clinical 记录中的 medications（门诊/出院小结里的用药方案）
-    for item in (groups.get('clinical') or []):
-        for m in (item.get('medications') or []):
-            if isinstance(m, dict):
-                _add_med(
-                    m.get('name', '') or m.get('drug', ''),
-                    m.get('dosage') or m.get('dose', '') or '',
-                    m.get('route', ''),
-                    m.get('purpose', '') or m.get('type', ''),
-                )
-            elif isinstance(m, str):
-                _add_med(m, '')
+    # 补充：从 clinical 和 medication 组的 medications 字段
+    for grp_key in ('clinical', 'medication'):
+        for item in (groups.get(grp_key) or []):
+            for m in (item.get('medications') or []):
+                if isinstance(m, dict):
+                    _add_med(
+                        m.get('name', '') or m.get('drug', ''),
+                        m.get('dosage') or m.get('dose', '') or '',
+                        m.get('route', ''),
+                        m.get('purpose', '') or m.get('type', ''),
+                        _is_chemo(m.get('name', '') or m.get('drug', '')),
+                    )
+                elif isinstance(m, str):
+                    _add_med(m, '')
 
-    # 补充来源：medication 组中的 medications
-    for item in (groups.get('medication') or []):
-        for m in (item.get('medications') or []):
-            if isinstance(m, dict):
-                _add_med(
-                    m.get('name', '') or m.get('drug', ''),
-                    m.get('dosage') or m.get('dose', '') or '',
-                    m.get('route', ''),
-                    m.get('purpose', '') or m.get('type', ''),
-                )
+    # 兜底：从 sanitized 原文用正则提取处方剂量（LLM 常漏剂量字段）
+    if any(not t['dose'] for t in medication_table):
+        import re as _re
+        for item in (groups.get('clinical') or []) + (groups.get('medication') or []):
+            fname = item.get('_source_file', '')
+            src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+            if not src.exists():
+                continue
+            raw = src.read_text(encoding='utf-8')
+            for m in _re.finditer(
+                r'(?:[※\[]?[甲乙丙丁戊己庚辛]*\d*%?[※\]]?\s*)'
+                r'([\u4e00-\u9fff]+\s*(?:注射液|粉针|胶囊|片剂|口服液|软膏)?[^，\n,]*)'
+                r'\s*[\d.]+\s*(?:g|mg|ml|支|瓶|袋)[^，\n]*?'
+                r'(?:静滴|静推|口服|肌注|皮下)',
+                raw,
+            ):
+                rx_text = m.group(0)
+                # 提取剂量
+                dose_m = _re.search(r'([\d.]+\s*(?:g|mg|ml|支|瓶|袋)\s*(?:×\s*[\d.]+)?)', rx_text)
+                dose = dose_m.group(1) if dose_m else ''
+                route_m = _re.search(r'(静滴|静推|口服|肌注|皮下)', rx_text)
+                route = route_m.group(1) if route_m else ''
+                name = _re.sub(r'[\d.]+\s*(?:g|mg|ml|支|瓶|袋)[\d.×\s]*', '', rx_text)
+                name = _re.sub(r'(静滴|静推|口服|肌注|皮下).*', '', name).strip()
+                name = _re.sub(r'^[甲乙丙丁戊己庚辛]*\d*%?[※\]]?\s*', '', name).strip()
+                if len(name) > 3 and name not in {'氯化钠注射液', '氯化钠注射液(辰欣)', '氯化钠注射液(双鹤)'}:
+                    _add_med(name, dose, route, '', _is_chemo(name))
 
     medication_prescription_date = ''
     if med_tl.get('timeline'):
