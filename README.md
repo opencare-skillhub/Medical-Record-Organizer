@@ -20,14 +20,35 @@
 ### 1. 安装依赖
 
 ```bash
-# pyproject.toml 方式（推荐）
+# 方式一：pyproject.toml（推荐，自动管理虚拟环境 + 依赖锁定）
 uv sync
 
-# 或 pip 方式
+# 方式二：pip
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
+### 2. 运行方式
+
+```bash
+# 方式一：uv run（自动使用 .venv，无需手动激活环境）
+uv run ./xyb process /path/to/病历/ --patient P001 --format all
+
+# 方式二：激活后直接运行
+source .venv/bin/activate   # 激活虚拟环境
+./xyb process /path/to/病历/ --patient P001 --format all
+
+# 方式三：python 直接调用
+python3 scripts/v2/pipeline_v2.py \
+  --input-dir /path/to/病历/ \
+  --output-dir /path/to/output/ \
+  --patient-id P001 \
+  --format all --open
+```
+
+> **提示**：`uv sync` 会自动创建 `.venv` 虚拟环境并安装所有依赖。
+> 之后既可用 `uv run <command>` 直接执行（无需手动激活），也可先 `source .venv/bin/activate` 再运行。
+
+### 3. 配置 API Key
 
 ```bash
 cp .env.example .env

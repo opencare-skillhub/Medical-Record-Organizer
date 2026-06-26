@@ -20,14 +20,35 @@
 ### 1. Установка зависимостей
 
 ```bash
-# pyproject.toml (рекомендуется)
+# Способ 1: pyproject.toml (рекомендуется — автоуправление venv + lockfile)
 uv sync
 
-# или pip
+# Способ 2: pip
 pip install -r requirements.txt
 ```
 
-### 2. Настройка API ключей
+### 2. Запуск конвейера
+
+```bash
+# Способ 1: uv run (автоиспользование .venv, без ручной активации)
+uv run ./xyb process /path/to/records/ --patient P001 --format all
+
+# Способ 2: активация venv, затем запуск
+source .venv/bin/activate
+./xyb process /path/to/records/ --patient P001 --format all
+
+# Способ 3: прямой вызов python
+python3 scripts/v2/pipeline_v2.py \
+  --input-dir /path/to/records/ \
+  --output-dir /path/to/output/ \
+  --patient-id P001 \
+  --format all --open
+```
+
+> **Примечание**: `uv sync` создаёт виртуальное окружение `.venv` и устанавливает все зависимости.
+> После этого вы можете использовать `uv run <command>` (без ручной активации) или активировать окружение вручную.
+
+### 3. Настройка API ключей
 
 ```bash
 cp .env.example .env

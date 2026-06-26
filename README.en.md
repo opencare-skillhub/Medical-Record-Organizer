@@ -20,14 +20,35 @@ Special thanks to the ❤️ 小胰宝 (Xiaoyibao) community & open-source contr
 ### 1. Install Dependencies
 
 ```bash
-# pyproject.toml (recommended)
+# Option 1: pyproject.toml (recommended — auto-manages venv + lockfile)
 uv sync
 
-# or pip
+# Option 2: pip
 pip install -r requirements.txt
 ```
 
-### 2. Configure API Keys
+### 2. Run the Pipeline
+
+```bash
+# Option 1: uv run (uses .venv automatically, no manual activation needed)
+uv run ./xyb process /path/to/records/ --patient P001 --format all
+
+# Option 2: activate venv then run
+source .venv/bin/activate
+./xyb process /path/to/records/ --patient P001 --format all
+
+# Option 3: direct python invocation
+python3 scripts/v2/pipeline_v2.py \
+  --input-dir /path/to/records/ \
+  --output-dir /path/to/output/ \
+  --patient-id P001 \
+  --format all --open
+```
+
+> **Note**: `uv sync` creates a `.venv` virtual environment and installs all dependencies.
+> After that you can either use `uv run <command>` (no manual activation needed) or `source .venv/bin/activate` first.
+
+### 3. Configure API Keys
 
 ```bash
 cp .env.example .env

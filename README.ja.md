@@ -20,14 +20,35 @@
 ### 1. 依存関係のインストール
 
 ```bash
-# pyproject.toml（推奨）
+# 方法1: pyproject.toml（推奨 — venv・lockfile 自動管理）
 uv sync
 
-# または pip
+# 方法2: pip
 pip install -r requirements.txt
 ```
 
-### 2. APIキーの設定
+### 2. パイプラインの実行方法
+
+```bash
+# 方法1: uv run（.venv を自動使用、手動アクティベーション不要）
+uv run ./xyb process /path/to/records/ --patient P001 --format all
+
+# 方法2: venv をアクティベートしてから実行
+source .venv/bin/activate
+./xyb process /path/to/records/ --patient P001 --format all
+
+# 方法3: python 直接呼び出し
+python3 scripts/v2/pipeline_v2.py \
+  --input-dir /path/to/records/ \
+  --output-dir /path/to/output/ \
+  --patient-id P001 \
+  --format all --open
+```
+
+> **備考**: `uv sync` は `.venv` 仮想環境を作成し、全依存関係をインストールします。
+> その後 `uv run <command>`（手動アクティベーション不要）または手動アクティベーションのいずれかで実行できます。
+
+### 3. APIキーの設定
 
 ```bash
 cp .env.example .env

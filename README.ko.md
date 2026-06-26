@@ -20,14 +20,35 @@
 ### 1. 의존성 설치
 
 ```bash
-# pyproject.toml (권장)
+# 방법 1: pyproject.toml (권장 — venv + lockfile 자동 관리)
 uv sync
 
-# 또는 pip
+# 방법 2: pip
 pip install -r requirements.txt
 ```
 
-### 2. API 키 설정
+### 2. 파이프라인 실행 방법
+
+```bash
+# 방법 1: uv run (.venv 자동 사용, 수동 활성화 불필요)
+uv run ./xyb process /path/to/records/ --patient P001 --format all
+
+# 방법 2: venv 활성화 후 실행
+source .venv/bin/activate
+./xyb process /path/to/records/ --patient P001 --format all
+
+# 방법 3: python 직접 호출
+python3 scripts/v2/pipeline_v2.py \
+  --input-dir /path/to/records/ \
+  --output-dir /path/to/output/ \
+  --patient-id P001 \
+  --format all --open
+```
+
+> **참고**: `uv sync`는 `.venv` 가상 환경을 생성하고 모든 의존성을 설치합니다.
+> 이후 `uv run <command>`(수동 활성화 불필요) 또는 수동 활성화 후 실행할 수 있습니다.
+
+### 3. API 키 설정
 
 ```bash
 cp .env.example .env
