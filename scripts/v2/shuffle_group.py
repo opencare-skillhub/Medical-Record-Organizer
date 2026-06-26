@@ -333,6 +333,9 @@ def merge_lab_trends(lab_group: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     trends: Dict[str, Any] = defaultdict(lambda: {'unit': '', 'ref_range': None, 'trend': []})
 
+    # 导入标准化函数，统一缩写名与中文名（如 CA199 ↔ 糖链抗原19-9）
+    from scripts.v2.render_html import _standard_marker_name
+
     for report in lab_group:
         date = report.get('document_date') or report.get('report_date') or ''
         lab_values = report.get('lab_values') or []
@@ -344,13 +347,14 @@ def merge_lab_trends(lab_group: List[Dict[str, Any]]) -> Dict[str, Any]:
             name = (lv.get('name') or '').strip()
             if not name:
                 continue
-            if not trends[name]['unit'] and lv.get('unit'):
-                trends[name]['unit'] = lv['unit']
+            std_name = _standard_marker_name(name)  # 标准化: CA199=糖链抗原19-9
+            if not trends[std_name]['unit'] and lv.get('unit'):
+                trends[std_name]['unit'] = lv['unit']
             ref_low = lv.get('ref_low')
             ref_high = lv.get('ref_high')
             if ref_low is not None and ref_high is not None:
-                trends[name]['ref_range'] = (ref_low, ref_high)
-            trends[name]['trend'].append({
+                trends[std_name]['ref_range'] = (ref_low, ref_high)
+            trends[std_name]['trend'].append({
                 'date': lv.get('date') or date,
                 'value': lv.get('value'),
                 'unit': lv.get('unit'),
@@ -362,7 +366,7 @@ def merge_lab_trends(lab_group: List[Dict[str, Any]]) -> Dict[str, Any]:
             })
 
     for name in trends:
-        trends[name]['trend'].sort(key=lambda x: x.get('date', '') or '')
+        trends[name]['trend'].sort(key=lambda x: (not x.get('date', ''), x.get('date', '') or ''))
         # 去重：同一日期同一值的重复条目只保留一个
         seen = set()
         deduped = []
