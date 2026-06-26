@@ -1010,56 +1010,12 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 key_concerns.append({'text': a.get('message', ''), 'priority': 'low', 'analysis': '', 'priority_label': '低'})
 
     # ---- consultation_questions ----
-    # 从 MDT 分析中获取 LLM 生成的咨询建议，失败时基于数据异常动态生成
     mdt_analysis = profile.get('mdt_analysis') or {}
     consultation_questions = mdt_analysis.get('consultation_questions') or []
     if not consultation_questions:
-        q = []
-
-        # 基于实际异常发现生成问诊建议
-        if tumor_marker_tables:
-            # 找出趋势异常的标志物
-            rising = []
-            falling = []
-            for name, mdata in tumor_marker_tables.items():
-                rows = mdata.get('rows', [])
-                if len(rows) >= 2:
-                    try:
-                        first_v = float(rows[0].get('value', 0) or 0)
-                        last_v = float(rows[-1].get('value', 0) or 0)
-                        if first_v > 0:
-                            pct = (last_v - first_v) / first_v * 100
-                            if pct > 20: rising.append(f'{name}(+{pct:.0f}%)')
-                            elif pct < -20: falling.append(f'{name}({pct:.0f}%)')
-                    except (ValueError, TypeError): continue
-            if rising:
-                q.append(f'{"、".join(rising)}持续上升，需向医生确认是否提示疾病进展？是否需调整治疗方案？')
-            if falling:
-                q.append(f'{"、".join(falling)}呈下降趋势，需确认当前治疗是否持续有效？')
-
-        abnormal_markers = [a for a in (lab_abnormal or []) if a.get('name') in ('ALT','AST','GGT','TBIL','CREA','WBC','PLT','Hb')]
-        if abnormal_markers:
-            items = '、'.join(f"{a['name']}={a['value']}" for a in abnormal_markers[:4])
-            q.append(f'检查发现肝功能/血常规异常（{items}），需向医生确认是否需调整化疗方案或加用保肝/升白药物？')
-
-        if genetic_highlights:
-            path_genes = [g for g in genetic_highlights if g.get('significance') == 'pathogenic']
-            if path_genes:
-                q.append(f'检测到{",".join(g["gene"] for g in path_genes[:3])}致病突变，需向医生确认是否影响靶向/免疫治疗选择？家属是否需遗传咨询？')
-
-        if len(medication_table) >= 5:
-            q.append(f'已使用多线化疗（{len(medication_table)}种药物），需向医生了解目前耐药性情况及后续治疗备选方案')
-
-        if not q:
-            # 兜底：基础建议
-            if not imaging_summary: q.append('建议补充历次影像检查报告（CT/MRI/PET-CT），以对照评估病灶变化')
-            if not tumor_marker_tables: q.append('建议补充历次肿瘤标志物结果以完善趋势分析')
-            if not medication_table: q.append('建议补充用药方案详细信息（药物、剂量、周期）')
-            if not pathology_diagnosis: q.append('建议补充病理报告（组织学类型、TNM分期、免疫组化）')
-        if q:
-            consultation_questions = q[:5]
-        else:
-            consultation_questions = ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
+        consultation_questions = _generate_questions_with_llm(
+            tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items
+        ) or ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
 
     # ---- files ----
     files: List[Dict[str, Any]] = []
@@ -1282,6 +1238,65 @@ def _condense_timeline_with_llm(
 # ---------------------------------------------------------------------------
 # 渲染入口
 # ---------------------------------------------------------------------------
+def _generate_questions_with_llm(
+    tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items,
+) -> list:
+    """用 LLM 基于实际数据生成 3-5 条具体可操作的问诊建议。"""
+    try:
+        from scripts.v2.llm_client import call_llm_with_retry
+    except ImportError:
+        return []
+    # 构建上下文
+    ctx_lines = []
+    ctx_lines.append(f"患者: {demographics.get('gender','')} {demographics.get('age','')}岁")
+    ctx_lines.append(f"诊断: {demographics.get('primary_diagnosis','')}")
+    ctx_lines.append("")
+    if tumor_marker_tables:
+        ctx_lines.append("【肿瘤标志物趋势】")
+        for name, mdata in tumor_marker_tables.items():
+            rows = mdata.get('rows', [])
+            if rows:
+                vals = [(r.get('date','')[-5:], r.get('value','')) for r in rows[-5:]]
+                ctx_lines.append(f"  {name}: {' → '.join(f'{d}={v}' for d,v in vals)}")
+    if genetic_highlights:
+        pathogenic = [g for g in genetic_highlights if g.get('significance') == 'pathogenic']
+        if pathogenic:
+            ctx_lines.append(f"致病突变: {', '.join(g['gene'] for g in pathogenic)}")
+    if medication_table:
+        ctx_lines.append(f"当前用药: {len(medication_table)}种")
+    if timeline_items:
+        recent = [t for t in timeline_items[-3:] if isinstance(t, dict)]
+        if recent:
+            ctx_lines.append(f"最近诊疗: {'; '.join(str(t.get('event',''))[:40] for t in recent)}")
+    text = '\n'.join(ctx_lines)
+    schema = {
+        'type': 'object',
+        'properties': {
+            'questions': {
+                'type': 'array',
+                'items': {'type': 'string'},
+            },
+        },
+    }
+    prompt = (
+        '你是一位肿瘤内科医生。下面是患者最近的数据。请提出3-5条最关键的、下次问诊时患者应向医生确认的问题。'
+        '要求: 1)每条问题必须基于上面数据中的具体数字和趋势; '
+        '2)明确指出哪个指标、什么方向的变化、关注的临床意义; '
+        '3)有可操作的下一步建议(如调整方案/加做检查/关注副作用等); '
+        '4)不要用空泛表述(如"完善检查""继续观察"等). '
+        '用患者能理解的中文提问。输出JSON: {"questions": [...]}'
+    )
+    try:
+        result = call_llm_with_retry(
+            [{'role':'system', 'content': prompt}, {'role':'user', 'content': text}],
+            schema, max_tokens=2000
+        )
+        qs = result.get('questions', []) if isinstance(result, dict) else []
+        return qs[:5] if isinstance(qs, list) else []
+    except Exception:
+        return []
+
+
 def render_html_report(
     profile: Dict[str, Any],
     groups: Dict[str, List[Dict[str, Any]]],
