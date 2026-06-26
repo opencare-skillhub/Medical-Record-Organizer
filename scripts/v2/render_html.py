@@ -1023,20 +1023,14 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
                 key_concerns.append({'text': a.get('message', ''), 'priority': 'low', 'analysis': '', 'priority_label': '低'})
 
     # ---- consultation_questions ----
+    # 必须使用 LLM 生成（MDT 或独立 LLM），不采用数据驱动兜底（百分比计算易产生垃圾内容）
     mdt_analysis = profile.get('mdt_analysis') or {}
     consultation_questions = mdt_analysis.get('consultation_questions') or []
     if not consultation_questions:
-        llm_q = _generate_questions_with_llm(
-            tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items
-        )
-        if llm_q:
-            consultation_questions = llm_q
-        else:
-            # LLM 不可用时，基于最近数据变化生成有意义的问题
-            q = _build_data_driven_questions(
-                tumor_marker_tables, genetic_highlights, medication_table, imaging_summary, lab_abnormal
-            )
-            consultation_questions = q if q else ['根据现有资料，病情档案已较为完整。建议线下就诊时携带全部检查资料。']
+        # MDT 未生成时，使用独立 LLM（推荐百万上下文模型）基于完整数据生成
+        consultation_questions = _generate_questions_with_llm(
+            tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items, imaging_summary
+        ) or ['⚠️ 问诊建议需要 LLM（推荐百万上下文模型）才能生成，当前未配置 API Key 或调用失败。请配置 .env 中的 LLM_DEFAULT_MODEL 后重新运行。']
 
     # ---- files ----
     files: List[Dict[str, Any]] = []
@@ -1260,35 +1254,53 @@ def _condense_timeline_with_llm(
 # 渲染入口
 # ---------------------------------------------------------------------------
 def _generate_questions_with_llm(
-    tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items,
+    tumor_marker_tables, genetic_highlights, medication_table, demographics, timeline_items, imaging_summary=None,
 ) -> list:
-    """用 LLM 基于实际数据生成 3-5 条具体可操作的问诊建议。"""
+    """用 LLM（推荐百万上下文模型）基于完整数据生成 3-5 条问诊建议。
+    必须使用 LLM — 数据驱动版本易产生无意义的百分比计算。
+    """
     try:
         from scripts.v2.llm_client import call_llm_with_retry
     except ImportError:
         return []
-    # 构建上下文
+    # 构建完整上下文（百万上下文模型可全量发送）
     ctx_lines = []
     ctx_lines.append(f"患者: {demographics.get('gender','')} {demographics.get('age','')}岁")
     ctx_lines.append(f"诊断: {demographics.get('primary_diagnosis','')}")
     ctx_lines.append("")
+    # 肿瘤标志物完整趋势（非仅最近5点）
     if tumor_marker_tables:
-        ctx_lines.append("【肿瘤标志物趋势】")
+        ctx_lines.append("【肿瘤标志物完整趋势】")
         for name, mdata in tumor_marker_tables.items():
             rows = mdata.get('rows', [])
             if rows:
-                vals = [(r.get('date','')[-5:], r.get('value','')) for r in rows[-5:]]
+                vals = [(r.get('date','')[-10:], r.get('value','')) for r in rows]
                 ctx_lines.append(f"  {name}: {' → '.join(f'{d}={v}' for d,v in vals)}")
+                ref = mdata.get('ref_range', '')
+                if ref:
+                    ctx_lines.append(f"    参考范围: {ref}")
+    # 基因检测完整结果
     if genetic_highlights:
-        pathogenic = [g for g in genetic_highlights if g.get('significance') == 'pathogenic']
-        if pathogenic:
-            ctx_lines.append(f"致病突变: {', '.join(g['gene'] for g in pathogenic)}")
+        ctx_lines.append("【基因检测】")
+        for g in genetic_highlights:
+            sig = {'pathogenic': '致病', 'mutation': '突变', 'drug': '药敏'}.get(g.get('significance', ''), '')
+            ctx_lines.append(f"  {g['gene']}: {g.get('result','')} [{sig}]")
+    # 用药方案
     if medication_table:
-        ctx_lines.append(f"当前用药: {len(medication_table)}种")
+        ctx_lines.append("【当前用药方案】")
+        for m in medication_table:
+            ctx_lines.append(f"  {m.get('name','')} {m.get('dose','')} {m.get('route','')} {m.get('purpose','')}")
+    # 影像检查
+    if imaging_summary:
+        ctx_lines.append("【影像检查】")
+        for im in imaging_summary[:6]:
+            ctx_lines.append(f"  {im.get('date','')} {im.get('modality','')}: {str(im.get('findings',''))[:120]}")
+    # 时间线
     if timeline_items:
-        recent = [t for t in timeline_items[-3:] if isinstance(t, dict)]
-        if recent:
-            ctx_lines.append(f"最近诊疗: {'; '.join(str(t.get('event',''))[:40] for t in recent)}")
+        ctx_lines.append("【诊疗时间线】")
+        for t in timeline_items:
+            if isinstance(t, dict):
+                ctx_lines.append(f"  {t.get('date','')} {str(t.get('event',''))[:80]} → {str(t.get('result',''))[:40]}")
     text = '\n'.join(ctx_lines)
     schema = {
         'type': 'object',
@@ -1300,55 +1312,26 @@ def _generate_questions_with_llm(
         },
     }
     prompt = (
-        '你是一位肿瘤内科医生。下面是患者最近的数据。请提出3-5条最关键的、下次问诊时患者应向医生确认的问题。'
-        '要求: 1)每条问题必须基于上面数据中的具体数字和趋势; '
-        '2)明确指出哪个指标、什么方向的变化、关注的临床意义; '
-        '3)有可操作的下一步建议(如调整方案/加做检查/关注副作用等); '
-        '4)不要用空泛表述(如"完善检查""继续观察"等). '
-        '用患者能理解的中文提问。输出JSON: {"questions": [...]}'
+        '你是一位资深肿瘤内科医生。下面是患者的完整病情数据。请提出3-5条下次问诊时患者应向医生确认的关键问题。'
+        '要求:\n'
+        '1. 每条必须基于上面数据中的具体数值、趋势方向、基因检测结果或影像对比\n'
+        '2. 明确指出指标名+具体数值+变化方向+临床意义\n'
+        '3. 给出可操作的下一步建议（如是否调整方案/加做检查/关注副作用/评估靶向适用性等）\n'
+        '4. 用患者能理解的自然中文，不用"AFP(+284%)"等数字按钮式表达\n'
+        '5. 示例：「CA199从基线342持续降至29.70，降幅91%，但目前仍高于正常上限(37)。需向医生确认是否需继续监测或调整治疗方案？」\n'
+        '6. 必须与病情进展、后续治疗、异常发现高度相关\n'
+        '输出JSON: {"questions": [...]}'
     )
     try:
+        # 使用最大输出 token 确保完整生成
         result = call_llm_with_retry(
             [{'role':'system', 'content': prompt}, {'role':'user', 'content': text}],
-            schema, max_tokens=2000
+            schema, max_tokens=4000
         )
         qs = result.get('questions', []) if isinstance(result, dict) else []
         return qs[:5] if isinstance(qs, list) else []
     except Exception:
         return []
-
-
-def _build_data_driven_questions(tumor_marker_tables, genetic_highlights, medication_table, imaging_summary, lab_abnormal) -> list:
-    """基于数据生成问诊建议（无需LLM，仅用有明确日期的最近趋势点）。"""
-    q = []
-    for name, mdata in (tumor_marker_tables or {}).items():
-        rows = mdata.get('rows', [])
-        # 仅取有日期的数据点
-        dated = [r for r in rows if r.get('date') and r.get('value')]
-        if len(dated) >= 3:
-            try:
-                vals = [(r['date'], float(r['value'])) for r in dated[-3:]]
-                if len(vals) >= 2 and vals[-2][1] > 0:
-                    pct = (vals[-1][1] - vals[-2][1]) / vals[-2][1] * 100
-                    if abs(pct) > 15:
-                        direction = '升高' if pct > 0 else '下降'
-                        q.append(f'{name}近次检测{direction}{abs(pct):.0f}%（{vals[-2][1]}→{vals[-1][1]}，{vals[-1][0][:10]}），需向医生了解原因及临床意义')
-            except (ValueError, TypeError):
-                continue
-    pathogenic = [g for g in (genetic_highlights or []) if g.get('significance') == 'pathogenic']
-    if pathogenic:
-        names = '、'.join(g['gene'] for g in pathogenic[:3])
-        q.append(f'检测到{names}致病突变，需向医生确认是否影响靶向/免疫治疗选择')
-    drug_genes = [g for g in (genetic_highlights or []) if g.get('significance') == 'drug']
-    high_risk = [g for g in drug_genes if '风险较高' in str(g.get('result','')) or '高风险' in str(g.get('result',''))]
-    if high_risk:
-        names = '、'.join(g['gene'] for g in high_risk[:2])
-        q.append(f'{names}基因型提示特定化疗药不良反应高风险，需确认用药前是否已做剂量调整')
-    if imaging_summary:
-        compares = [im.get('compare','') for im in imaging_summary if im.get('compare')]
-        if compares:
-            q.append(f'影像检查显示{compares[-1][:40]}，需向医生了解整体疗效评估（CR/PR/SD/PD）')
-    return q[:5]
 
 
 def render_html_report(
