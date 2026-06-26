@@ -241,6 +241,16 @@ def _normalize_lab_item(raw: Dict[str, Any], fallback_date: str = '') -> Dict[st
     abnormal = raw.get('abnormal')
     date = raw.get('date') or fallback_date or ''
 
+    # 规整化 abnormal 字符串（LLM 有时返回 "high"/"normal" 等非 bool 值）
+    if isinstance(abnormal, str):
+        ab_lower = abnormal.strip().lower()
+        if ab_lower in ('true', 'high', '↑', 'abnormal', 'yes'):
+            abnormal = True
+        elif ab_lower in ('false', 'normal', '→', '', '-', 'none'):
+            abnormal = False
+        else:
+            abnormal = False  # 未知字符串视为正常
+
     # 从 reference_range 字符串解析
     if ref_low is None and ref_high is None:
         ref_range_str = raw.get('reference_range') or raw.get('ref_range') or ''
@@ -353,5 +363,14 @@ def merge_lab_trends(lab_group: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     for name in trends:
         trends[name]['trend'].sort(key=lambda x: x.get('date', '') or '')
+        # 去重：同一日期同一值的重复条目只保留一个
+        seen = set()
+        deduped = []
+        for row in trends[name]['trend']:
+            key = (row.get('date', ''), str(row.get('value', '')))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(row)
+        trends[name]['trend'] = deduped
 
     return dict(trends)
