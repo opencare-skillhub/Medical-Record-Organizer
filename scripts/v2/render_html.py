@@ -412,17 +412,35 @@ def compute_report_context(profile: Dict[str, Any], groups: Dict[str, List[Dict[
             best_clinical = item
 
     if best_clinical:
+        # 从 OCR 原文提取处方段，过滤非处方药物
+        fname = best_clinical.get('_source_file', '')
+        src = Path(profile.get('output_dir', '')) / 'sanitized' / fname
+        rx_section = ''
+        if src.exists():
+            raw = src.read_text(encoding='utf-8')
+            import re as _re
+            rx_m = _re.search(r'(?:西药及中成药方|西药和中成药方|处方)[：:](.*?)(?:【医保|【限定|【注|申请单|临床诊断|$)', raw, _re.DOTALL)
+            if rx_m:
+                rx_section = rx_m.group(1)
+
         for m in (best_clinical.get('medications') or []):
+            name = ''
             if isinstance(m, dict):
-                _add_med(
-                    m.get('name', '') or m.get('drug', ''),
-                    m.get('dosage') or m.get('dose', '') or '',
-                    m.get('route', ''),
-                    m.get('purpose', '') or m.get('type', ''),
-                    _is_chemo(m.get('name', '') or m.get('drug', '')),
-                )
+                name = m.get('name', '') or m.get('drug', '')
             elif isinstance(m, str):
-                _add_med(m, '')
+                name = m
+            if not name:
+                continue
+            # 过滤：仅保留出现在处方段中的药物
+            if rx_section and name.split('(')[0].strip() not in rx_section:
+                continue
+            _add_med(
+                name,
+                m.get('dosage') or m.get('dose', '') or '' if isinstance(m, dict) else '',
+                m.get('route', '') if isinstance(m, dict) else '',
+                m.get('purpose', '') or m.get('type', '') if isinstance(m, dict) else '',
+                _is_chemo(name),
+            )
         if best_clinical.get('document_date'):
             medication_prescription_date = best_clinical['document_date']
 
